@@ -1,0 +1,37 @@
+services:
+  # PostgreSQL with the pgvector extension preinstalled.
+  # We use the pgvector image (not plain postgres) from day one so that Phase 2
+  # (knowledge-base embeddings) needs no image swap and no data migration.
+  #
+  # NOTE: the schema is NOT created here. It is owned by Alembic migrations
+  # (backend/alembic/versions/). Bind-mounting schema.sql into
+  # /docker-entrypoint-initdb.d would only ever run on a fresh volume, which
+  # means every schema change would require wiping the database.
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: flowtutor-db
+    environment:
+      POSTGRES_USER: flowtutor
+      POSTGRES_PASSWORD: flowtutor
+      POSTGRES_DB: flowtutor
+    # Mapped to 5433 to avoid colliding with a Postgres already on the host.
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowtutor -d flowtutor"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Not wired up until later phases (async eval queue / hot-path caching).
+  # Started now so the compose file matches the target architecture.
+  redis:
+    image: redis:7-alpine
+    container_name: flowtutor-redis
+    ports:
+      - "6380:6379"
+
+volumes:
+  pgdata:

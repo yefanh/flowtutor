@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    // Vite does the transpiling; tsc is used purely as a type checker.
+    "noEmit": true,
+
+    // strict is the whole point of adding TypeScript. Without it, `any` leaks
+    // in everywhere and the API contract stops being enforced.
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  // One program covering app code and the build config. Project references
+  // would be the alternative, but they buy incremental-build speed this
+  // codebase is far too small to need.
+  "include": ["src", "vite.config.ts"]
+}

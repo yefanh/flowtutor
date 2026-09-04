@@ -1,0 +1,54 @@
+[project]
+name = "flowtutor-backend"
+version = "0.1.0"
+description = "FlowTutor API -- adaptive learning platform backend"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    # psycopg 3 (not psycopg2): it has first-class async support, which the
+    # whole request path depends on.
+    "psycopg[binary,pool]>=3.2",
+    "python-dotenv>=1.0",
+    # Alembic pulls in SQLAlchemy. We use neither as an ORM -- SQLAlchemy is
+    # only the connection/DDL layer Alembic runs migrations through. All
+    # application queries stay raw SQL.
+    "alembic>=1.14",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",
+    "ruff>=0.8",
+]
+
+# This is an application, not a distributable package, so uv should not try to
+# build and install it into the environment.
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# extend-exclude, NOT exclude: `exclude` replaces ruff's built-in defaults
+# (.venv, __pycache__, ...) instead of adding to them.
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+# E/F: pyflakes + pycodestyle errors. I: import sorting (replaces isort).
+# UP: pyupgrade, modernizes syntax. B: bugbear, catches real bug patterns.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+# asyncio_mode = auto so async test functions need no per-test decorator.
+asyncio_mode = "auto"
+# One event loop for the whole session. psycopg's async connections are bound
+# to the loop that created them, so the pool fixture and the tests that use it
+# must share a loop.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+# The app modules live at the backend root, not in a package.
+pythonpath = ["."]
+testpaths = ["tests"]
