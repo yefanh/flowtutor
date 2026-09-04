@@ -102,14 +102,30 @@ class Hint:
     hit_step_limit: bool
 
 
-def build_task(stem: str, chosen: str) -> str:
+def build_task(stem: str, chosen: str, standing: str = "") -> str:
     """What the agent is given to start with.
 
-    Deliberately thin: the question and the wrong choice, and no material. The
-    agent has to go and find that, which is the point -- handing it passages up
-    front would decide for it what the hint should be about.
+    No material: the agent has to search for that itself, and handing it
+    passages up front would decide for it what the hint should be about.
+
+    But a one-line summary of how the learner is doing IS included, and that is
+    a correction to an earlier design. `recall_learner` was originally the only
+    way to know anything about them -- and it went uncalled, every time, even
+    for a learner at 0.12 mastery with four straight wrong answers.
+
+    The suspected reason was that the tool description said to use it "when
+    their mistake might be part of a pattern", and whether there IS a pattern
+    is only knowable by calling the tool. A tool worth calling only under a
+    condition the model cannot observe will not get called.
+
+    So the cheap signal goes in the prompt and the expensive detail stays
+    behind the tool, which makes calling it a decision the model can actually
+    make.
     """
-    return f"QUESTION\n{stem}\n\nWHAT THE LEARNER CHOSE (this is incorrect)\n{chosen}"
+    task = f"QUESTION\n{stem}\n\nWHAT THE LEARNER CHOSE (this is incorrect)\n{chosen}"
+    if standing:
+        task += f"\n\nHOW THIS LEARNER IS DOING ON THIS CONCEPT\n{standing}"
+    return task
 
 
 def _fallback(sources: list[str]) -> str:
@@ -132,7 +148,12 @@ async def generate(user_id: int, question: dict, selected: int, record: bool = T
     correct = options[question["answer"]]
 
     toolbox = tools.build(user_id, question)
-    run = await agent.run(system=SYSTEM_PROMPT, task=build_task(stem, chosen), toolbox=toolbox)
+    standing = await tools.standing_summary(user_id, question["concept_id"])
+    run = await agent.run(
+        system=SYSTEM_PROMPT,
+        task=build_task(stem, chosen, standing),
+        toolbox=toolbox,
+    )
 
     text = run.text
     latency = run.latency_ms

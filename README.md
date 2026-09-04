@@ -22,7 +22,8 @@ taught before being tested.
 | 2c | Hint generation + hint-before-reveal answer flow | done |
 | 3a | Agent loop, tools, cross-session memory, traces | done |
 | 3b | Code exercises + sandbox | blocked: no code exercises exist yet |
-| 4 | Evals, observability, load testing, deploy | next |
+| 4a | Hint evaluation harness (LLM-as-judge) | built, not yet run |
+| 4b | Load testing, deploy, resume numbers | |
 | 3 | Agent loop, tools, code sandbox, cross-session memory | |
 | 4 | Evals, observability, load testing, deploy | |
 
@@ -111,6 +112,62 @@ replaced, at slightly more latency. Switching is one env var.
 Whether the agent is *worth* it is a question for Phase 4: with traces recorded,
 hints that used `recall_learner` can be scored against hints that did not. Until
 that is measured, "the agent helps" is a hypothesis, not a result.
+
+### Evaluating the hints
+
+`evals/hint_eval.py`. Generation and judging are separate commands: generation
+burns free-tier quota and is slow, judging is cheap and is the part that gets
+iterated on. Rewriting the rubric should not mean paying to regenerate every
+hint.
+
+**The judge is told the correct answer. The tutor was not.** That asymmetry is
+the design. `guardrail.py` compares words, so it catches quoting and
+paraphrase-with-shared-vocabulary and nothing else — deciding whether two
+sentences *mean* the same thing needs a reader, and a reader needs to know what
+the answer is.
+
+Four criteria, judged independently, each with a written reason: **grounded**
+(no invented claims), **targeted** (engages the option they actually chose),
+**no_spoiler** (would a learner reading only this now know which option to
+pick?), **actionable** (something concrete to reconsider).
+
+There is no "ideal hint" recorded per case, which departs from the plan
+deliberately: a hint has many good forms, and scoring by similarity to one
+written answer rewards imitating its phrasing rather than teaching.
+
+An LLM grading an LLM is a proxy, not a verdict — it is lenient and can be
+swayed by fluent writing. Every judgement carries a reason so it can be argued
+with, and `hint_eval show` prints hints beside verdicts for a human to check. A
+judge nobody has disagreed with has not been validated; it has just not been
+read.
+
+**Status: built, not yet run.** Generating twenty hints plus judging them
+exceeded a day of free-tier quota. Two things were learned trying:
+
+- Flash-Lite is **15 requests per minute**, not per day, so a batch job hits the
+  wall immediately. The error carries the exact retry delay the server wants, so
+  the client now honours it — with a budget of zero in the request path (a
+  learner should get a fallback model, not a 35-second pause) and 90 seconds in
+  batch jobs, where nobody is waiting.
+- The harness wrote its cache only at the end, so a quota failure two cases from
+  finishing threw away eight hints that had already been paid for. It now
+  checkpoints after every case and resumes.
+
+### What the partial run already showed
+
+Eight of ten cases generated before the quota ran out, and two of them are more
+interesting than the six that worked:
+
+| Case | Steps | Tools |
+| --- | --- | --- |
+| 1–6 | 1 | search |
+| 7 | 5 (hit the limit) | search × 4, recall_learner |
+| 8 | 5 (hit the limit) | search × 5 |
+
+So the agent does reach for `recall_learner` — but only after four failed
+searches, and only while running out of steps. That is not planning, it is
+flailing, and `MAX_STEPS` is what stops it. A repeated identical call now gets
+told it already ran rather than being executed again.
 
 ### Observability
 

@@ -25,7 +25,9 @@ MODEL FALLBACK
     than a marginally better sentence, and the fallbacks cover the rest.
 """
 
+import asyncio
 import os
+import re
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -133,17 +135,33 @@ async def complete(
     max_output_tokens: int = 400,
     turns: list[Turn] | None = None,
     tools: list[ToolSpec] | None = None,
+    json_schema: dict | None = None,
+    model: str | None = None,
+    rate_limit_wait: float = 0.0,
 ) -> Completion:
     """One model call.
 
     Either `user` (a single prompt) or `turns` (a running conversation, which
     is what the agent loop passes).
+
+    `json_schema` constrains the reply to that shape. Used by the evaluation
+    judge: a grader that answers in prose has to be parsed with a regex, and a
+    grader whose output occasionally fails to parse silently drops the cases it
+    was least sure about -- exactly the ones worth reading.
+
+    `model` overrides the configured default, for A/B runs.
+
+    `rate_limit_wait` is the longest this call may sleep and retry when the
+    provider says "too fast". Zero in the request path -- a learner waiting for
+    a hint should get a fallback model or an error, not a 35-second pause. Set
+    high for batch jobs, where the alternative is a run that dies a third of
+    the way through.
     """
     if turns is None:
         turns = [Turn(role="user", text=user or "")]
 
     if PROVIDER == "google":
-        return await _google(system, turns, tools or [], max_output_tokens)
+        return await _google(system, turns, tools or [], max_output_tokens, json_schema, model)
     raise LLMError(f"unknown LLM_PROVIDER: {PROVIDER!r}")
 
 
@@ -204,6 +222,9 @@ async def _google(
     turns: list["Turn"],
     tools: list["ToolSpec"],
     max_output_tokens: int,
+    json_schema: dict | None = None,
+    model_override: str | None = None,
+    rate_limit_wait: float = 0.0,
 ) -> Completion:
     from google.genai import types
 
@@ -224,11 +245,14 @@ async def _google(
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
         tools=[types.Tool(function_declarations=declarations)] if declarations else None,
+        response_mime_type="application/json" if json_schema else None,
+        response_schema=json_schema,
     )
     contents = [_to_google_content(turn, types) for turn in turns]
 
+    candidates = [model_override] if model_override else [MODEL, *FALLBACK_MODELS]
     errors: list[str] = []
-    for model in [MODEL, *FALLBACK_MODELS]:
+    for model in candidates:
         started = time.perf_counter()
         try:
             response = await client.aio.models.generate_content(
@@ -236,13 +260,31 @@ async def _google(
             )
         except Exception as exc:  # noqa: BLE001 -- provider SDKs raise their own types
             message = str(exc).split("\n")[0]
-            errors.append(f"{model}: {message}")
-            # Overload and rate limiting are the failures a fallback exists for.
-            # Anything else (bad key, bad request) will fail the same way on
-            # every model, so there is no point burning the fallbacks on it.
-            if not any(code in message for code in ("503", "429", "500", "UNAVAILABLE")):
-                break
-            continue
+
+            # The free tier limits requests per MINUTE (15 on Flash-Lite), and
+            # the error carries the exact wait the server wants. Honouring it
+            # is the difference between a batch job that finishes and one that
+            # dies a third of the way through.
+            delay = _suggested_retry_delay(str(exc))
+            if delay and delay <= rate_limit_wait:
+                await asyncio.sleep(delay + 0.5)
+                try:
+                    response = await client.aio.models.generate_content(
+                        model=model, contents=contents, config=config
+                    )
+                except Exception as retry_exc:  # noqa: BLE001
+                    message = str(retry_exc).split("\n")[0]
+                    errors.append(f"{model}: {message}")
+                    continue
+            else:
+                errors.append(f"{model}: {message}")
+                # Overload and rate limiting are the failures a fallback
+                # exists for. Anything else (bad key, bad request) fails the
+                # same way on every model, so there is no point burning the
+                # fallbacks on it.
+                if not any(code in message for code in ("503", "429", "500", "UNAVAILABLE")):
+                    break
+                continue
 
         calls = tuple(
             ToolCall(name=c.name or "", arguments=dict(c.args or {}))
@@ -261,3 +303,9 @@ async def _google(
         )
 
     raise LLMError("; ".join(errors) or "no model responded")
+
+
+def _suggested_retry_delay(message: str) -> float | None:
+    """The wait the provider asked for, if it said."""
+    match = re.search(r"'retryDelay': '(\d+)s'", message)
+    return float(match.group(1)) if match else None

@@ -1,0 +1,79 @@
+{
+  "about": [
+    "Cases for evaluating hints: a question, and a specific wrong option.",
+    "",
+    "There is no 'ideal hint' recorded against each case, and that is a",
+    "deliberate departure from the plan. A hint has many good forms -- point at",
+    "the misconception, point at the lesson, ask the right question -- and",
+    "scoring by similarity to one written answer would reward imitation of its",
+    "phrasing rather than whether it teaches. The judge scores against criteria",
+    "instead, and it is given the correct answer so it can catch spoilers the",
+    "lexical guardrail cannot.",
+    "",
+    "`stem_starts_with` is a tripwire: if the seed data changes and the ids",
+    "point somewhere else, the run fails loudly instead of quietly grading the",
+    "wrong questions."
+  ],
+  "cases": [
+    {
+      "question_id": 1,
+      "stem_starts_with": "What is the primary reason to put a cache",
+      "selected": 1,
+      "misconception": "thinks a cache is about correctness"
+    },
+    {
+      "question_id": 1,
+      "stem_starts_with": "What is the primary reason to put a cache",
+      "selected": 2,
+      "misconception": "thinks a cache is durable storage"
+    },
+    {
+      "question_id": 2,
+      "stem_starts_with": "In the cache-aside pattern",
+      "selected": 0,
+      "misconception": "thinks the database pushes into the cache"
+    },
+    {
+      "question_id": 2,
+      "stem_starts_with": "In the cache-aside pattern",
+      "selected": 2,
+      "misconception": "thinks the cache prefetches for itself"
+    },
+    {
+      "question_id": 3,
+      "stem_starts_with": "A key expires and thousands",
+      "selected": 0,
+      "misconception": "reaches for capacity when the problem is timing"
+    },
+    {
+      "question_id": 3,
+      "stem_starts_with": "A key expires and thousands",
+      "selected": 2,
+      "misconception": "names the wrong failure and would disable the cache"
+    },
+    {
+      "question_id": 4,
+      "stem_starts_with": "What is the key difference between write-through",
+      "selected": 1,
+      "misconception": "has the read/write speed trade-off backwards"
+    },
+    {
+      "question_id": 4,
+      "stem_starts_with": "What is the key difference between write-through",
+      "selected": 3,
+      "misconception": "believes the two terms are interchangeable"
+    },
+    {
+      "question_id": 5,
+      "stem_starts_with": "Your cache hit rate is high",
+      "selected": 0,
+      "misconception": "treats staleness as a capacity problem"
+    },
+    {
+      "question_id": 5,
+      "stem_starts_with": "Your cache hit rate is high",
+      "selected": 1,
+      "misconception": "treats staleness as an eviction-policy problem"
+    }
+  ]
+}

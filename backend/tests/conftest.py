@@ -55,7 +55,11 @@ def fake_llm(monkeypatch):
         max_output_tokens: int = 400,
         turns: list | None = None,
         tools: list | None = None,
+        **_ignored,
     ):
+        # **_ignored so that adding a parameter to llm.complete does not break
+        # every test that stubs it. The stub cares about what is sent to the
+        # model, not about transport options like retry budgets.
         conversation = "\n".join(t.text for t in turns if t.text) if turns else (user or "")
         sent.append(
             {

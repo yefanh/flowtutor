@@ -131,6 +131,7 @@ async def run(
     toolbox: tools.Toolbox,
     max_steps: int = MAX_STEPS,
     max_output_tokens: int = 320,
+    rate_limit_wait: float = 0.0,
 ) -> AgentRun:
     """Plan, act, observe, repeat.
 
@@ -139,6 +140,7 @@ async def run(
     turns = [llm.Turn(role="user", text=task)]
     result = AgentRun(text="")
     started = time.perf_counter()
+    already_called: set[tuple[str, str]] = set()
 
     for step_number in range(max_steps + 1):
         last_step = step_number == max_steps
@@ -151,6 +153,7 @@ async def run(
             # them away makes an answer the only thing it can produce.
             tools=None if last_step else toolbox.specs,
             max_output_tokens=max_output_tokens,
+            rate_limit_wait=rate_limit_wait,
         )
         result.model = completion.model
 
@@ -176,7 +179,24 @@ async def run(
         # one turn should see them happen in the order it asked for.
         for call in completion.tool_calls:
             call_started = time.perf_counter()
-            output = await toolbox.run(call.name, call.arguments)
+            signature = (call.name, repr(sorted(call.arguments.items())))
+
+            if signature in already_called:
+                # Observed: a model searched for the same phrase five times in
+                # a row and burned the whole step budget. The limit stopped it,
+                # but stopping is not the same as helping -- repeating a call
+                # is usually a model that did not notice it had the answer
+                # already, so say so instead of running the query again.
+                output = {
+                    "error": (
+                        "You already ran this exact call and have the result "
+                        "above. Use it, or try something different."
+                    )
+                }
+            else:
+                already_called.add(signature)
+                output = await toolbox.run(call.name, call.arguments)
+
             duration = (time.perf_counter() - call_started) * 1000
 
             result.steps.append(
