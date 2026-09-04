@@ -26,6 +26,7 @@ THE LEAK
 from dataclasses import dataclass
 
 import db
+from tutor import embedding
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,8 @@ async def rebuild() -> dict[str, int]:
         (keys,),
     )
 
+    embedded = await backfill_embeddings()
+
     stats = await db.query_one(
         """
         SELECT count(*) AS total,
@@ -151,7 +154,35 @@ async def rebuild() -> dict[str, int]:
         "total": stats["total"],
         "without_embedding": stats["without_embedding"],
         "removed": removed["n"],
+        "embedded": embedded,
     }
+
+
+async def backfill_embeddings(batch_size: int = 32) -> int:
+    """Compute vectors for chunks that do not have one.
+
+    Only the missing ones, which is what makes `rebuild` cheap to run: editing
+    a single lesson step re-embeds that step, not the corpus. The upsert above
+    is what marks a chunk as needing this, by nulling the vector whenever the
+    text it was derived from changed.
+    """
+    pending = await db.query_all(
+        "SELECT id, title, content FROM kb_chunks WHERE embedding IS NULL ORDER BY id"
+    )
+    if not pending:
+        return 0
+
+    for start in range(0, len(pending), batch_size):
+        batch = pending[start : start + batch_size]
+        texts = [embedding.document_text(r["title"], r["content"]) for r in batch]
+        vectors = await embedding.embed_documents(texts)
+        for row, vector in zip(batch, vectors, strict=True):
+            await db.execute(
+                "UPDATE kb_chunks SET embedding = %s WHERE id = %s",
+                (str(vector), row["id"]),
+            )
+
+    return len(pending)
 
 
 async def _main() -> None:
@@ -160,9 +191,9 @@ async def _main() -> None:
     try:
         stats = await rebuild()
         print(
-            f"{stats['total']} chunks "
-            f"({stats['without_embedding']} awaiting an embedding, "
-            f"{stats['removed']} removed)"
+            f"{stats['total']} chunks | {stats['embedded']} newly embedded | "
+            f"{stats['without_embedding']} still without a vector | "
+            f"{stats['removed']} removed"
         )
     finally:
         await db.pool.close()

@@ -14,6 +14,7 @@ dependencies = [
     # only the connection/DDL layer Alembic runs migrations through. All
     # application queries stay raw SQL.
     "alembic>=1.14",
+    "fastembed>=0.8.0",
 ]
 
 [dependency-groups]

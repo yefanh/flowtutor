@@ -40,9 +40,26 @@ async def _keyword(query: str, limit: int) -> list[str]:
     return [c.key for c in await retrieval.keyword_search(query, limit=limit)]
 
 
+async def _dense(query: str, limit: int) -> list[str]:
+    return [c.key for c in await retrieval.dense_search(query, limit=limit)]
+
+
+async def _hybrid(query: str, limit: int) -> list[str]:
+    return [c.key for c in await retrieval.hybrid_search(query, limit=limit)]
+
+
+async def _hybrid_reranked(query: str, limit: int) -> list[str]:
+    return [c.key for c in await retrieval.search(query, limit=limit)]
+
+
 # Adding a method is one entry here; every metric and comparison follows.
+# Order matters only for reading the output: each row adds one thing to the
+# row above it, so the table reads as a sequence of decisions.
 METHODS: dict[str, Method] = {
-    "keyword": _keyword,
+    "keyword only": _keyword,
+    "dense only": _dense,
+    "hybrid (RRF)": _hybrid,
+    "hybrid + rerank": _hybrid_reranked,
 }
 
 
@@ -123,14 +140,21 @@ async def main() -> None:
         total = await db.query_one("SELECT count(*) AS n FROM kb_chunks")
         print(f"{len(queries)} queries against {total['n']} chunks\n")
 
-        header = f"{'method':<20}{'Recall@5':>10}{'Hit@5':>8}{'MRR':>8}{'misses':>8}"
+        baseline = None
+        header = f"{'method':<20}{'Recall@5':>10}{'vs base':>9}{'Hit@5':>8}{'MRR':>8}{'misses':>8}"
         print(header)
         print("-" * len(header))
 
         results = await run(k=5)
         for r in results:
+            if baseline is None:
+                baseline = r.recall
+                delta = ""
+            else:
+                delta = f"{(r.recall - baseline) / baseline * 100:+.1f}%"
             print(
-                f"{r.method:<20}{r.recall:>10.3f}{r.hit_rate:>8.3f}{r.mrr:>8.3f}{len(r.misses):>8}"
+                f"{r.method:<20}{r.recall:>10.3f}{delta:>9}"
+                f"{r.hit_rate:>8.3f}{r.mrr:>8.3f}{len(r.misses):>8}"
             )
 
         for r in results:

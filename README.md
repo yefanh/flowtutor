@@ -18,8 +18,8 @@ taught before being tested.
 | 1 | Adaptive difficulty engine (mastery tracking, flow-zone selection) | done |
 | 1.5 | Teaching mode — lessons before questions (piloted on Caching) | done |
 | 2a | Knowledge base, keyword retrieval, measurement harness | done |
-| 2b | Embeddings, hybrid retrieval, reranking | needs an API key |
-| 2c | Hint generation + hint-before-reveal answer flow | needs an API key |
+| 2b | Embeddings, hybrid retrieval, reranking | done |
+| 2c | Hint generation + hint-before-reveal answer flow | next |
 | 3 | Agent loop, tools, code sandbox, cross-session memory | |
 | 4 | Evals, observability, load testing, deploy | |
 
@@ -73,24 +73,72 @@ through `to_tsvector` and the lexemes rejoined with `|`.
 24 golden queries over 29 chunks, phrased the way a stuck learner would put
 them. `uv run python -m evals.retrieval_eval`
 
-| Method | Recall@5 | Hit@5 | MRR |
+| Method | Recall@5 | vs keyword | Hit@5 | MRR | queries with nothing relevant |
+| --- | --- | --- | --- | --- | --- |
+| keyword only | 0.806 | — | 0.875 | 0.651 | 3 |
+| dense only | 0.882 | +9.5% | 0.917 | 0.842 | 2 |
+| hybrid (RRF) | 0.847 | +5.2% | 0.875 | 0.823 | 3 |
+| **hybrid + rerank** | **0.924** | **+14.7%** | **1.000** | **0.892** | **0** |
+
+Hit@5 of 1.000 is the line that matters most: every query now retrieves
+something genuinely relevant, so no hint is generated with nothing behind it.
+
+**Two findings that contradict the plan, recorded rather than smoothed over.**
+
+*Hybrid alone is worse than dense alone* (0.847 against 0.882). RRF weights both
+methods equally, and keyword search is the weaker of the two here, so fusing it
+in at equal weight pulls the ordering down. On 24 queries a gap that size is
+within noise, but it does not support the assumption that hybrid always beats
+its parts.
+
+What hybrid is actually for, then, is not the final ordering — it is the
+candidate pool. Fusion puts the right chunk *somewhere* in the top 10 more
+reliably than either method alone, and the reranker fixes the order. That is why
+`hybrid + rerank` (0.924) beats `dense + rerank` would-be alternatives while
+`hybrid` alone does not beat `dense` alone.
+
+*The target improvement was not met.* The build spec asked for hybrid+rerank to
+beat pure dense retrieval by 15–20% on Recall@5. The real number is **+4.8%**
+(0.882 → 0.924). Against keyword-only it is +14.7%. The corpus is 29 clean,
+well-separated chunks, which leaves little headroom — the honest number stays
+here rather than the target.
+
+### Choosing the models
+
+Both by measurement, and both times the smaller model won.
+
+**Embeddings** — `evals/embedding_bakeoff.py`
+
+| Model | dim | Recall@5 | MRR | ms/query |
+| --- | --- | --- | --- | --- |
+| bge-small-en-v1.5 | 384 | 0.882 | 0.821 | 9 |
+| **bge-base-en-v1.5** | **768** | **0.882** | **0.842** | **37** |
+| bge-large-en-v1.5 | 1024 | 0.847 | 0.814 | 41 |
+
+The largest was the worst. "Bigger model" is a hypothesis, not a plan.
+
+**Reranker** — `evals/reranker_bakeoff.py`
+
+| Model | Recall@5 | MRR | ms/query |
 | --- | --- | --- | --- |
-| keyword only | **0.806** | 0.875 | 0.651 |
-| + dense (embeddings) | not yet measured | | |
-| + reranking | not yet measured | | |
+| **ms-marco-MiniLM-L-6-v2** | **0.924** | **0.889** | **255** |
+| ms-marco-MiniLM-L-12-v2 | 0.924 | 0.896 | 512 |
+| bge-reranker-base | 0.903 | 0.904 | 1923 |
+| jina-reranker-v1-turbo-en | 0.882 | 0.814 | 347 |
 
-Keyword search found nothing at all for three queries, and they show exactly
-where lexical matching runs out:
+`jina-reranker-v2` scores higher than any of these and is excluded anyway: it is
+CC-BY-NC, and this project has to stay usable.
 
-- *"what actually is a cache"* — the word appears in every chunk, so it
-  discriminates nothing
-- *"how long should something stay in the cache"* — the answer says TTL, time to
-  live, lifetime, sixty seconds; the query shares no word with any of them
-- *"is a cache a kind of database"* — both terms are everywhere
+**Search depth and rerank pool are separate numbers.** Searching deeper is
+nearly free; reranking deeper is not — the cross-encoder is the slowest step and
+its cost is linear in pool size. Quality plateaus at 10 candidates while latency
+keeps climbing (131ms at 10, 260ms at 20, for identical scores). Collapsing both
+into one constant shrank the search depth too and dropped Recall@5 from 0.924 to
+0.882, which is how the distinction was found.
 
-These are the queries dense retrieval exists for. The ruler was built before the
-thing it measures, so the improvement will be a number rather than an
-impression.
+**Everything runs locally.** Embeddings and reranking are small ONNX models on
+the machine: no key, no rate limit, no network round trip, and nothing to pay.
+At this corpus size a hosted embedding API would buy nothing.
 
 ## Teaching mode
 
@@ -266,10 +314,14 @@ of editing the file and applying it again.
 │   │   └── teaching.py    when to explain instead of test
 │   ├── tutor/
 │   │   ├── knowledge_base.py  assembling the retrievable corpus
-│   │   └── retrieval.py       finding material to ground a hint
+│   │   ├── embedding.py       local vectors (bge-base, ONNX)
+│   │   ├── reranking.py       local cross-encoder
+│   │   └── retrieval.py       keyword, dense, hybrid, rerank
 │   ├── evals/
 │   │   ├── golden_retrieval.json  24 hand-written query/answer pairs
-│   │   └── retrieval_eval.py      Recall@k, Hit@k, MRR
+│   │   ├── retrieval_eval.py      Recall@k, Hit@k, MRR
+│   │   ├── embedding_bakeoff.py   picking the embedding model
+│   │   └── reranker_bakeoff.py    picking the reranker
 │   ├── lessons.sql        lesson content (idempotent)
 │   ├── seed.sql           5 concepts, 22 questions (idempotent)
 │   ├── alembic/versions/  schema migrations
