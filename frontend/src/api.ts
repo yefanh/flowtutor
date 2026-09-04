@@ -1,6 +1,11 @@
 // Thin wrapper around the backend. All paths go through the Vite proxy (/api).
 
-import type { AnswerResult, AnswerSubmission, Question } from './types'
+import type {
+  AnswerResult,
+  AnswerSubmission,
+  ConceptMastery,
+  Question,
+} from './types'
 
 const BASE = '/api'
 
@@ -18,6 +23,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export function fetchQuestion(userId: number): Promise<Question> {
   return request<Question>(`/question?user_id=${userId}`)
+}
+
+export function fetchMastery(userId: number): Promise<ConceptMastery[]> {
+  return request<ConceptMastery[]>(`/mastery?user_id=${userId}`)
 }
 
 export function submitAnswer({

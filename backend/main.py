@@ -1,10 +1,11 @@
-"""FastAPI entrypoint -- Phase 0.
+"""FastAPI entrypoint -- Phase 1.
 
 Endpoints:
     GET  /health    liveness + database connectivity
-    GET  /concepts  list concepts (useful while seeding/debugging)
-    GET  /question  serve one question, WITHOUT the answer
-    POST /answer    grade a submission server-side and log the attempt
+    GET  /concepts  list concepts
+    GET  /question  serve the next question, chosen adaptively, WITHOUT the answer
+    POST /answer    grade a submission, update mastery, log the attempt
+    GET  /mastery   this learner's mastery across every concept
 
 SECURITY INVARIANT (holds for every later phase too):
     The correct answer never leaves the server before the learner has submitted.
@@ -21,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import db
+from adaptive import engine, model
 
 
 @asynccontextmanager
@@ -31,7 +33,7 @@ async def lifespan(app: FastAPI):
     await db.pool.close()
 
 
-app = FastAPI(title="FlowTutor API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="FlowTutor API", version="0.2.0", lifespan=lifespan)
 
 # The Vite dev server proxies /api to this process, so CORS is not strictly
 # needed in development. Kept for direct calls from the browser or curl.
@@ -69,6 +71,21 @@ class AnswerIn(BaseModel):
     time_spent: int | None = Field(default=None, ge=0)
 
 
+class MasteryDelta(BaseModel):
+    """How this answer moved the learner's estimate for the concept.
+
+    Returned so the UI can show capability changing -- the only kind of
+    progress feedback this product gives.
+    """
+
+    concept_id: int
+    concept_name: str
+    previous: float
+    current: float
+    delta: float
+    crossed_threshold: bool
+
+
 class AnswerOut(BaseModel):
     """What the client sees AFTER submitting -- now the answer is fair game."""
 
@@ -76,6 +93,15 @@ class AnswerOut(BaseModel):
     correct_answer: int
     explanation: str | None
     attempt_id: int
+    mastery: MasteryDelta
+
+
+class ConceptMasteryOut(BaseModel):
+    concept_id: int
+    concept_name: str
+    score: float
+    attempts: int
+    is_mastered: bool
 
 
 # ------------------------------------------------------------------ endpoints
@@ -97,46 +123,31 @@ async def list_concepts():
 
 @app.get("/question", response_model=QuestionOut)
 async def get_question(user_id: int = Query(default=1, ge=1)):
-    """Serve the next question.
+    """Serve the next question, chosen by the adaptive engine.
 
-    PHASE 0: uniformly random, with one small courtesy -- never repeat the
-    question the learner just answered.
-
-    PHASE 1 REPLACES THIS ENTIRE BODY. This is the seam where the adaptive
-    engine plugs in: instead of random, it will read the learner's mastery per
-    concept and pick a difficulty just above it (the flow zone), with ~20%
-    exploration. Everything else in the request path stays the same.
+    The route stays thin on purpose: all of the selection logic lives in
+    adaptive/, where it can be tested and simulated without HTTP or a server.
     """
-    row = await db.query_one(
-        """
-        SELECT q.id, q.concept_id, c.name AS concept_name,
-               q.stem, q.options, q.difficulty
-        FROM questions q
-        JOIN concepts c ON c.id = q.concept_id
-        WHERE q.id IS DISTINCT FROM (
-            SELECT question_id FROM attempts
-            WHERE user_id = %s
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-        )
-        ORDER BY random()
-        LIMIT 1
-        """,
-        (user_id,),
-    )
-    if row is None:
+    question = await engine.select_question(user_id)
+    if question is None:
         raise HTTPException(status_code=404, detail="no questions available")
-    return row
+    return question
 
 
 @app.post("/answer", response_model=AnswerOut)
 async def submit_answer(payload: AnswerIn):
-    """Grade a submission and record the attempt.
+    """Grade a submission, record it, and update the mastery estimate.
 
     The client sends only which option it picked. We look the truth up here.
     """
     question = await db.query_one(
-        "SELECT id, options, answer, explanation FROM questions WHERE id = %s",
+        """
+        SELECT q.id, q.concept_id, c.name AS concept_name,
+               q.options, q.answer, q.difficulty, q.explanation
+        FROM questions q
+        JOIN concepts c ON c.id = q.concept_id
+        WHERE q.id = %s
+        """,
         (payload.question_id,),
     )
     if question is None:
@@ -145,29 +156,64 @@ async def submit_answer(payload: AnswerIn):
     if payload.selected >= len(question["options"]):
         raise HTTPException(status_code=400, detail="selected option out of range")
 
-    is_correct = payload.selected == question["answer"]
+    result = await engine.apply_attempt(
+        user_id=payload.user_id,
+        question=question,
+        selected=payload.selected,
+        time_spent=payload.time_spent,
+    )
 
-    attempt = await db.execute(
-        """
-        INSERT INTO attempts (user_id, question_id, selected, is_correct, time_spent)
-        VALUES (%s, %s, %s, %s, %s)
-        RETURNING id
-        """,
-        (
-            payload.user_id,
-            payload.question_id,
-            payload.selected,
-            is_correct,
-            payload.time_spent,
+    return AnswerOut(
+        is_correct=result.is_correct,
+        correct_answer=result.correct_answer,
+        explanation=result.explanation,
+        attempt_id=result.attempt_id,
+        mastery=MasteryDelta(
+            concept_id=result.concept_id,
+            concept_name=result.concept_name,
+            previous=result.mastery_before,
+            current=result.mastery_after,
+            delta=result.mastery_after - result.mastery_before,
+            crossed_threshold=result.crossed_threshold,
         ),
     )
 
-    # PHASE 1 HOOK: this is where mastery gets updated, right after the attempt
-    # is durably logged.
 
-    return AnswerOut(
-        is_correct=is_correct,
-        correct_answer=question["answer"],
-        explanation=question["explanation"],
-        attempt_id=attempt["id"],
-    )
+@app.get("/mastery", response_model=list[ConceptMasteryOut])
+async def get_mastery(user_id: int = Query(default=1, ge=1)):
+    """This learner's capability across every concept.
+
+    This is the progress surface of the product. It reports what the learner
+    can now do -- deliberately not how many days in a row they showed up.
+    """
+    return [
+        ConceptMasteryOut(
+            concept_id=c.concept_id,
+            concept_name=c.concept_name,
+            score=c.score,
+            attempts=c.attempts,
+            is_mastered=c.is_mastered,
+        )
+        for c in await engine.get_mastery(user_id)
+    ]
+
+
+@app.get("/debug/selection")
+async def debug_selection(user_id: int = Query(default=1, ge=1)):
+    """Why the engine would pick what it picks. Development aid, not product.
+
+    Shows the target difficulty and predicted success rate per concept, which
+    is the fastest way to check the engine is behaving before trusting the UI.
+    """
+    return [
+        {
+            "concept": c.concept_name,
+            "mastery": round(c.score, 3),
+            "attempts": c.attempts,
+            "target_difficulty": round(model.target_difficulty(c.score), 2),
+            "predicted_success": {
+                f"d{d}": round(model.probability_correct(c.score, d), 2) for d in range(1, 6)
+            },
+        }
+        for c in await engine.get_mastery(user_id)
+    ]

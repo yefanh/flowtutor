@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 
-import { fetchQuestion, submitAnswer } from './api'
+import { fetchMastery, fetchQuestion, submitAnswer } from './api'
+import MasteryPanel from './components/MasteryPanel'
 import QuestionCard from './components/QuestionCard'
-import type { AnswerResult, Question } from './types'
+import type { AnswerResult, ConceptMastery, Question } from './types'
 
 // No auth in Phase 0. A real user id arrives with accounts; until then every
 // session is the same learner, which is enough to exercise the attempt log.
@@ -12,9 +13,21 @@ export default function App() {
   const [question, setQuestion] = useState<Question | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
   const [result, setResult] = useState<AnswerResult | null>(null)
+  const [mastery, setMastery] = useState<ConceptMastery[]>([])
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  const message = (err: unknown) =>
+    err instanceof Error ? err.message : String(err)
+
+  const loadMastery = useCallback(async () => {
+    try {
+      setMastery(await fetchMastery(USER_ID))
+    } catch (err) {
+      setError(message(err))
+    }
+  }, [])
 
   const loadQuestion = useCallback(async () => {
     setLoading(true)
@@ -24,11 +37,11 @@ export default function App() {
     try {
       const q = await fetchQuestion(USER_ID)
       setQuestion(q)
-      // Time-on-task is a signal the adaptive engine uses in Phase 1: a correct
-      // answer that took 90 seconds is weaker evidence than one that took 10.
+      // Time-on-task feeds the adaptive engine: a correct answer that took two
+      // minutes is weaker evidence of mastery than an instant one.
       setStartedAt(Date.now())
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(message(err))
     } finally {
       setLoading(false)
     }
@@ -36,7 +49,8 @@ export default function App() {
 
   useEffect(() => {
     loadQuestion()
-  }, [loadQuestion])
+    loadMastery()
+  }, [loadQuestion, loadMastery])
 
   async function handleSubmit() {
     if (selected === null || result !== null || question === null) return
@@ -45,11 +59,15 @@ export default function App() {
         userId: USER_ID,
         questionId: question.id,
         selected,
-        timeSpent: startedAt ? Math.round((Date.now() - startedAt) / 1000) : undefined,
+        timeSpent: startedAt
+          ? Math.round((Date.now() - startedAt) / 1000)
+          : undefined,
       })
       setResult(res)
+      // The answer just changed the estimate, so the progress view is stale.
+      await loadMastery()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(message(err))
     }
   }
 
@@ -80,6 +98,13 @@ export default function App() {
             onSelect={setSelected}
             onSubmit={handleSubmit}
             onNext={loadQuestion}
+          />
+        )}
+
+        {mastery.length > 0 && (
+          <MasteryPanel
+            mastery={mastery}
+            highlightConceptId={question?.concept_id}
           />
         )}
       </main>

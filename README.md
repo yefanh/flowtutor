@@ -9,13 +9,13 @@ metric is mastery gain, never streaks or daily active use.
 
 ## Status
 
-**Phase 0 complete** — one question works end to end: serve → answer →
-server-side grading → attempt logged.
+**Phase 1 complete** — the engine now estimates what each learner knows and
+pitches the next question at the edge of it.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 0 | Skeleton: React + FastAPI + Postgres, one question end to end | done |
-| 1 | Adaptive difficulty engine (mastery tracking, flow-zone selection) | next |
+| 1 | Adaptive difficulty engine (mastery tracking, flow-zone selection) | done |
 | 2 | AI tutor: hybrid retrieval + RAG hints | |
 | 3 | Agent loop, tools, code sandbox, cross-session memory | |
 | 4 | Evals, observability, load testing, deploy | |
@@ -36,6 +36,50 @@ Notable choices and why:
 - **pgvector, not a dedicated vector database.** Hybrid retrieval needs keyword
   search too, and Postgres has full-text built in — so both halves live in one
   database and one query.
+- **The adaptive model is pure functions.** `backend/adaptive/model.py` has no
+  database and no I/O, so it can be unit tested and simulated directly. The
+  database layer wraps it rather than being tangled through it.
+
+## The adaptive engine
+
+The product's core loop. Full commentary is in `backend/adaptive/model.py`; the
+short version:
+
+**Estimating.** Each learner has a mastery score per concept, on 0..1. After
+every answer it moves by the *prediction error* — how surprising the outcome
+was, given what the model expected:
+
+    delta = learning_rate * (actual_outcome - predicted_probability)
+
+This is the Elo update rule, and the online form of a 1-parameter item response
+model. It replaces "correct: +0.1, wrong: −0.1", which ignores the question: at
+mastery 0.5, passing a difficulty-1 question is worth **+0.041** while passing a
+difficulty-5 question is worth **+0.184**, and failing the easy one costs
+**−0.259** against **−0.116** for the hard one. No special cases produce that —
+it falls out of the error term.
+
+Two corrections on top:
+
+- **A guessing floor of 0.25.** Four options means a learner who knows nothing
+  still scores 25%. Without it, a lucky guess on a hard question reads as
+  mastery.
+- **A learning rate that decays with evidence.** The first answer on a concept
+  is most of what is known about the learner; the fiftieth is noise.
+
+**Selecting.** Two stages. *Which concept* is sampled with weight
+`(1 − mastery)²`, so a lone weak concept dominates the draw while a learner who
+is weak everywhere gets their topics interleaved. *How hard* is the difficulty
+at which the learner is predicted to succeed 75% of the time — assessment
+systems target 50% because a coin flip is maximally informative, but this is a
+learning product and the training literature puts optimal learning nearer 80%.
+
+Exploration fires 20% of the time (after a warmup) and ignores both stages.
+Without it the engine is a closed loop that only ever confirms its own estimate.
+
+**Known limitation.** Five difficulty rungs only resolve mastery between roughly
+0.37 and 0.87. Outside that band the selector clamps and the estimate drifts to
+the ceiling or floor. Widening it needs harder and easier *content*, not a
+better model. `tests/test_adaptive_model.py` asserts this so it stays visible.
 
 ## Quickstart
 
@@ -115,6 +159,9 @@ reloading content after a migration is safe.
 ├── backend/               FastAPI (async)
 │   ├── main.py            API endpoints
 │   ├── db.py              async connection pool
+│   ├── adaptive/
+│   │   ├── model.py       the mathematics -- pure functions, no I/O
+│   │   └── engine.py      selection and persistence around it
 │   ├── seed.sql           5 concepts, 22 questions (idempotent)
 │   ├── alembic/versions/  schema migrations
 │   └── tests/             pytest
@@ -123,17 +170,21 @@ reloading content after a migration is safe.
         ├── App.tsx
         ├── api.ts
         ├── types.ts       mirrors the backend response models
-        └── components/QuestionCard.tsx
+        └── components/
+            ├── QuestionCard.tsx
+            └── MasteryPanel.tsx
 ```
 
-## API (Phase 0)
+## API
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/health` | liveness + database connectivity |
 | GET | `/concepts` | list concepts |
-| GET | `/question?user_id=` | one question, **never** includes the answer |
-| POST | `/answer` | grades server-side, logs the attempt |
+| GET | `/question?user_id=` | next question, chosen adaptively, **never** includes the answer |
+| POST | `/answer` | grades server-side, logs the attempt, updates mastery |
+| GET | `/mastery?user_id=` | capability across every concept |
+| GET | `/debug/selection?user_id=` | why the engine picks what it picks (development aid) |
 
 **Security invariant:** the correct answer never reaches the client before
 submission, and grading always happens on the server. `QuestionOut` has no

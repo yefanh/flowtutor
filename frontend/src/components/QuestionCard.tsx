@@ -60,11 +60,43 @@ export default function QuestionCard({
         <div className={`result ${result.is_correct ? 'ok' : 'no'}`}>
           <strong>{result.is_correct ? 'Correct' : 'Not quite'}</strong>
           {result.explanation && <p>{result.explanation}</p>}
+          <MasteryChange result={result} />
           <button className="primary" onClick={onNext}>
             Next question
           </button>
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * Feedback tied to capability, not activity.
+ *
+ * The learner is told what changed about what they can do -- never how many
+ * questions they have answered today or how many days they have kept it up.
+ */
+function MasteryChange({ result }: { result: AnswerResult }) {
+  const { mastery } = result
+  const before = Math.round(mastery.previous * 100)
+  const after = Math.round(mastery.current * 100)
+  const rising = mastery.delta > 0
+
+  return (
+    <div className="mastery-change">
+      {mastery.crossed_threshold && (
+        <p className="breakthrough">
+          You have {mastery.concept_name} solid now.
+        </p>
+      )}
+      <p className="muted small">
+        {mastery.concept_name}{' '}
+        <span className="figure">{before}%</span>
+        <span className={rising ? 'arrow up' : 'arrow down'}>
+          {rising ? '↑' : '↓'}
+        </span>
+        <span className="figure">{after}%</span>
+      </p>
+    </div>
   )
 }

@@ -207,3 +207,118 @@ body {
   font: inherit;
   margin-left: 8px;
 }
+
+/* ------------------------------------------------------------ mastery panel */
+
+.mastery {
+  margin-top: 28px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px 24px;
+}
+
+.mastery-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.mastery-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.mastery-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.row-name {
+  font-size: 14px;
+}
+
+.row.active .row-name {
+  color: var(--accent);
+}
+
+.small {
+  font-size: 13px;
+}
+
+.solid-tag {
+  margin-left: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ok);
+  border: 1px solid var(--ok);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.bar {
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.45s ease;
+}
+
+.fill.done {
+  background: var(--ok);
+}
+
+/* --------------------------------------------------------- mastery feedback */
+
+.mastery-change {
+  margin: -8px 0 20px;
+}
+
+.breakthrough {
+  margin: 0 0 6px;
+  color: var(--ok);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.mastery-change p {
+  margin: 0;
+}
+
+.figure {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.arrow {
+  margin: 0 6px;
+  font-weight: 700;
+}
+
+.arrow.up {
+  color: var(--ok);
+}
+
+.arrow.down {
+  color: var(--no);
+}
