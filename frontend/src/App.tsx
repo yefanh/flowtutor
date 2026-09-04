@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import {
   completeLessonStep,
+  fetchHint,
   fetchMastery,
   fetchNext,
   submitAnswer,
@@ -9,7 +10,12 @@ import {
 import LessonCard from './components/LessonCard'
 import MasteryPanel from './components/MasteryPanel'
 import QuestionCard from './components/QuestionCard'
-import type { AnswerResult, ConceptMastery, NextItem } from './types'
+import type {
+  AnswerResult,
+  ConceptMastery,
+  HintResult,
+  NextItem,
+} from './types'
 
 // No auth yet. A real user id arrives with accounts; until then every session
 // is the same learner, which is enough to exercise the whole loop.
@@ -19,6 +25,8 @@ export default function App() {
   const [next, setNext] = useState<NextItem | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
   const [result, setResult] = useState<AnswerResult | null>(null)
+  const [hint, setHint] = useState<HintResult | null>(null)
+  const [hintPending, setHintPending] = useState(false)
   const [mastery, setMastery] = useState<ConceptMastery[]>([])
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
@@ -41,6 +49,7 @@ export default function App() {
     setError(null)
     setSelected(null)
     setResult(null)
+    setHint(null)
     try {
       const item = await fetchNext(USER_ID)
       setNext(item)
@@ -72,8 +81,24 @@ export default function App() {
     }
   }
 
+  async function handleAskForHint() {
+    if (next?.kind !== 'question' || selected === null) return
+    setHintPending(true)
+    try {
+      setHint(await fetchHint(USER_ID, next.question.id, selected))
+    } catch (err) {
+      setError(message(err))
+    } finally {
+      setHintPending(false)
+    }
+  }
+
   async function handleSubmit() {
-    if (next?.kind !== 'question' || selected === null || result !== null) return
+    if (next?.kind !== 'question' || selected === null) return
+    // A wrong first answer is not the end of the question, so submitting stays
+    // available until the answer has actually been revealed.
+    if (result?.revealed) return
+
     try {
       const res = await submitAnswer({
         userId: USER_ID,
@@ -84,7 +109,7 @@ export default function App() {
           : undefined,
       })
       setResult(res)
-      // The answer just changed the estimate, so the progress view is stale.
+      // The answer may have changed the estimate, so the progress view is stale.
       await loadMastery()
     } catch (err) {
       setError(message(err))
@@ -132,8 +157,11 @@ export default function App() {
             question={next.question}
             selected={selected}
             result={result}
+            hint={hint}
+            hintPending={hintPending}
             onSelect={setSelected}
             onSubmit={handleSubmit}
+            onAskForHint={handleAskForHint}
             onNext={loadNext}
           />
         )}

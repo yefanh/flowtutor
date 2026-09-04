@@ -367,3 +367,85 @@ body {
 .fill.teaching {
   background: var(--teach);
 }
+
+/* ------------------------------------------------------------------ hints */
+
+.retry {
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+}
+
+.retry > strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 16px;
+}
+
+.retry > p {
+  margin: 0 0 18px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.secondary {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px 20px;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.secondary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hint {
+  background: #1a2030;
+  border: 1px solid #2f3a52;
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+
+.hint-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.hint p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #dde1e8;
+}
+
+.hint-sources {
+  margin-top: 10px !important;
+  font-style: italic;
+}
+
+.tag {
+  margin-left: 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}

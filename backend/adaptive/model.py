@@ -88,6 +88,23 @@ applies only to gains, never to penalties: hesitating should not cost you.
 CAVEAT: this threshold is a guess. It should be replaced by a per-question
 percentile once there is enough response-time data to compute one."""
 
+HINT_ASSISTED_CREDIT = 0.4
+"""How much of the normal gain a correct answer earns after a hint.
+
+Getting there with help is real progress and should count -- but it is not the
+same evidence as getting there alone, and paying full credit for it would make
+the fastest route to a high score "ask for a hint every time". Mastery is meant
+to predict what the learner can do unaided, so an assisted success is weaker
+evidence of exactly that.
+
+Applied to gains only. A wrong answer after a hint is not punished extra: the
+hint was offered, taking it should never cost anything.
+
+0.4 is a judgement call, not a measurement. Nothing in the data says 0.4 rather
+than 0.3 or 0.5; it is set where a hinted answer clearly counts for less than
+an unaided one without being worthless.
+"""
+
 MASTERY_THRESHOLD = 0.8
 """Where a concept counts as "cracked". Used for progress display only -- the
 model itself has no notion of finished."""
@@ -167,6 +184,7 @@ def update(
     difficulty: int,
     is_correct: bool,
     time_spent: int | None = None,
+    used_hint: bool = False,
 ) -> MasteryUpdate:
     """Fold one answer into the mastery estimate."""
     predicted = probability_correct(mastery, difficulty)
@@ -175,8 +193,13 @@ def update(
 
     delta = rate * (outcome - predicted)
 
-    if is_correct and time_spent is not None and time_spent > SLOW_ANSWER_SECONDS:
-        delta *= SLOW_ANSWER_DAMPING
+    # Both dampers apply to gains only, and they compound: a slow, hinted
+    # correct answer is the weakest kind of evidence there is.
+    if is_correct:
+        if time_spent is not None and time_spent > SLOW_ANSWER_SECONDS:
+            delta *= SLOW_ANSWER_DAMPING
+        if used_hint:
+            delta *= HINT_ASSISTED_CREDIT
 
     updated = min(MAX_MASTERY, max(MIN_MASTERY, mastery + delta))
 

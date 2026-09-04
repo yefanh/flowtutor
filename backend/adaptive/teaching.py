@@ -78,6 +78,11 @@ async def concept_awaiting_practice(user_id: int) -> int | None:
     both the obvious thing to do and the point at which retrieval actually
     strengthens memory.
     """
+    # Tries, not evidence. `mastery.attempts` counts answers that MOVED the
+    # estimate, and a repeated wrong answer on the same question deliberately
+    # does not -- so using it here would leave a learner who keeps missing the
+    # same questions pinned to the concept forever, which is the exact trap
+    # this escape hatch exists to prevent. The attempt log counts tries.
     row = await db.query_one(
         """
         SELECT c.id
@@ -85,7 +90,11 @@ async def concept_awaiting_practice(user_id: int) -> int | None:
         JOIN lessons l ON l.concept_id = c.id
         LEFT JOIN mastery m ON m.concept_id = c.id AND m.user_id = %s
         WHERE COALESCE(m.score, %s) < %s
-          AND COALESCE(m.attempts, 0) < %s
+          AND (
+              SELECT count(*) FROM attempts a
+              JOIN questions q ON q.id = a.question_id
+              WHERE a.user_id = %s AND q.concept_id = c.id
+          ) < %s
         GROUP BY c.id
         -- Every authored step read, so the lesson is genuinely finished.
         HAVING count(l.id) = (
@@ -103,6 +112,7 @@ async def concept_awaiting_practice(user_id: int) -> int | None:
             user_id,
             model.DEFAULT_MASTERY,
             TEACH_BELOW,
+            user_id,
             PRACTICE_ATTEMPTS_BEFORE_MOVING_ON,
             user_id,
             user_id,

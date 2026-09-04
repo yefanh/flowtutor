@@ -4,6 +4,7 @@ import type {
   AnswerResult,
   AnswerSubmission,
   ConceptMastery,
+  HintResult,
   NextItem,
 } from './types'
 
@@ -43,6 +44,21 @@ export function completeLessonStep(
 
 export function fetchMastery(userId: number): Promise<ConceptMastery[]> {
   return request<ConceptMastery[]>(`/mastery?user_id=${userId}`)
+}
+
+export function fetchHint(
+  userId: number,
+  questionId: number,
+  selected: number,
+): Promise<HintResult> {
+  return request<HintResult>('/hint', {
+    method: 'POST',
+    body: JSON.stringify({
+      user_id: userId,
+      question_id: questionId,
+      selected,
+    }),
+  })
 }
 
 export function submitAnswer({

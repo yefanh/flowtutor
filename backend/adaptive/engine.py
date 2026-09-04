@@ -80,6 +80,9 @@ class AttemptResult:
     concept_name: str
     mastery_before: float
     mastery_after: float
+    used_hint: bool
+    mastery_updated: bool
+    first_attempt: bool
     predicted_probability: float
     crossed_threshold: bool
 
@@ -255,7 +258,11 @@ async def select_question(user_id: int, force_concept_id: int | None = None) -> 
 
 
 async def apply_attempt(
-    user_id: int, question: dict, selected: int, time_spent: int | None
+    user_id: int,
+    question: dict,
+    selected: int,
+    time_spent: int | None,
+    used_hint: bool = False,
 ) -> AttemptResult:
     """Record an answer and fold it into the mastery estimate.
 
@@ -269,16 +276,32 @@ async def apply_attempt(
     is_correct = selected == question["answer"]
     concept_id = question["concept_id"]
 
+    prior = await db.query_one(
+        "SELECT count(*) AS n FROM attempts WHERE user_id = %s AND question_id = %s",
+        (user_id, question["id"]),
+    )
+    first_attempt = prior["n"] == 0
+
+    # A retry that is wrong again is logged but does not move mastery.
+    #
+    # One question is one piece of evidence about whether the learner knows the
+    # concept. Charging for it twice counts the same information twice -- and
+    # the retry is a different, easier problem anyway: they now know one option
+    # is wrong, so the four-way guess has become a three-way one.
+    #
+    # A retry that is CORRECT does count, at the reduced hint-assisted rate.
+    score_it = first_attempt or is_correct
+
     async with db.pool.connection() as conn:
         async with conn.transaction():
             cur = await conn.execute(
                 """
                 INSERT INTO attempts
-                    (user_id, question_id, selected, is_correct, time_spent)
-                VALUES (%s, %s, %s, %s, %s)
+                    (user_id, question_id, selected, is_correct, time_spent, used_hint)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (user_id, question["id"], selected, is_correct, time_spent),
+                (user_id, question["id"], selected, is_correct, time_spent, used_hint),
             )
             attempt_id = (await cur.fetchone())["id"]
 
@@ -308,16 +331,18 @@ async def apply_attempt(
                 difficulty=question["difficulty"],
                 is_correct=is_correct,
                 time_spent=time_spent,
+                used_hint=used_hint,
             )
 
-            await conn.execute(
-                """
-                UPDATE mastery
-                SET score = %s, attempts = attempts + 1, updated_at = now()
-                WHERE user_id = %s AND concept_id = %s
-                """,
-                (result.updated, user_id, concept_id),
-            )
+            if score_it:
+                await conn.execute(
+                    """
+                    UPDATE mastery
+                    SET score = %s, attempts = attempts + 1, updated_at = now()
+                    WHERE user_id = %s AND concept_id = %s
+                    """,
+                    (result.updated, user_id, concept_id),
+                )
 
     return AttemptResult(
         attempt_id=attempt_id,
@@ -327,7 +352,10 @@ async def apply_attempt(
         concept_id=concept_id,
         concept_name=question["concept_name"],
         mastery_before=result.previous,
-        mastery_after=result.updated,
+        mastery_after=result.updated if score_it else result.previous,
+        used_hint=used_hint,
+        mastery_updated=score_it,
+        first_attempt=first_attempt,
         predicted_probability=result.predicted_probability,
         crossed_threshold=result.crossed_threshold,
     )

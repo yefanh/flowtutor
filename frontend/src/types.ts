@@ -52,13 +52,28 @@ export interface MasteryDelta {
   crossed_threshold: boolean
 }
 
-/** What comes back after submitting -- now the answer is fair game. */
+/**
+ * What comes back after submitting.
+ *
+ * `correct_answer` and `explanation` are null until `revealed` is true. A first
+ * wrong attempt withholds both on purpose: the learner gets a hint and another
+ * try instead, and there is nothing left to work out once you have been told.
+ */
 export interface AnswerResult {
   is_correct: boolean
-  correct_answer: number
+  revealed: boolean
+  correct_answer: number | null
   explanation: string | null
   attempt_id: number
   mastery: MasteryDelta
+  used_hint: boolean
+  mastery_updated: boolean
+}
+
+/** A nudge for a wrong answer. `citations` name the material behind it. */
+export interface HintResult {
+  hint: string
+  citations: string[]
 }
 
 /** One row of the progress view. */

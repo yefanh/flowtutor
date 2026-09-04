@@ -6,6 +6,7 @@ Endpoints:
     GET  /next      the next thing to do: a lesson step, or a question
     GET  /question  serve the next question, chosen adaptively, WITHOUT the answer
     POST /answer    grade a submission, update mastery, log the attempt
+    POST /hint      a grounded nudge for a wrong answer, without the answer
     POST /lesson/complete  mark a lesson step as read
     GET  /mastery   this learner's mastery and lesson progress per concept
 
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field
 
 import db
 from adaptive import engine, model, teaching
+from tutor import hints, llm
 
 
 @asynccontextmanager
@@ -36,7 +38,7 @@ async def lifespan(app: FastAPI):
     await db.pool.close()
 
 
-app = FastAPI(title="FlowTutor API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="FlowTutor API", version="0.4.0", lifespan=lifespan)
 
 # The Vite dev server proxies /api to this process, so CORS is not strictly
 # needed in development. Kept for direct calls from the browser or curl.
@@ -90,13 +92,33 @@ class MasteryDelta(BaseModel):
 
 
 class AnswerOut(BaseModel):
-    """What the client sees AFTER submitting -- now the answer is fair game."""
+    """What the client sees after submitting.
+
+    `correct_answer` and `explanation` are None until the answer is revealed.
+    A first wrong attempt deliberately withholds both: the learner gets a hint
+    and another try instead. Showing the answer immediately would make the
+    hint pointless -- there is nothing to work out once you have been told.
+    """
 
     is_correct: bool
-    correct_answer: int
+    revealed: bool
+    correct_answer: int | None
     explanation: str | None
     attempt_id: int
     mastery: MasteryDelta
+    used_hint: bool
+    mastery_updated: bool
+
+
+class HintIn(BaseModel):
+    user_id: int = Field(ge=1)
+    question_id: int = Field(ge=1)
+    selected: int = Field(ge=0)
+
+
+class HintOut(BaseModel):
+    hint: str
+    citations: list[str]
 
 
 class LessonStepOut(BaseModel):
@@ -217,36 +239,39 @@ async def get_question(user_id: int = Query(default=1, ge=1)):
 async def submit_answer(payload: AnswerIn):
     """Grade a submission, record it, and update the mastery estimate.
 
-    The client sends only which option it picked. We look the truth up here.
+    The client sends only which option it picked. Everything else -- whether
+    the answer is right, whether a hint was used, whether to reveal -- is
+    decided here. In particular `used_hint` is read from the database rather
+    than taken from the request: it reduces the mastery a correct answer earns,
+    so a client that reported its own hint usage could claim full credit for an
+    assisted answer.
     """
-    question = await db.query_one(
-        """
-        SELECT q.id, q.concept_id, c.name AS concept_name,
-               q.options, q.answer, q.difficulty, q.explanation
-        FROM questions q
-        JOIN concepts c ON c.id = q.concept_id
-        WHERE q.id = %s
-        """,
-        (payload.question_id,),
-    )
-    if question is None:
-        raise HTTPException(status_code=404, detail="question not found")
+    question = await _load_question(payload.question_id)
 
     if payload.selected >= len(question["options"]):
         raise HTTPException(status_code=400, detail="selected option out of range")
+
+    used_hint = await hints.was_used(payload.user_id, payload.question_id)
 
     result = await engine.apply_attempt(
         user_id=payload.user_id,
         question=question,
         selected=payload.selected,
         time_spent=payload.time_spent,
+        used_hint=used_hint,
     )
+
+    # Reveal on success, or once this is no longer their first go at it.
+    reveal = result.is_correct or not result.first_attempt
 
     return AnswerOut(
         is_correct=result.is_correct,
-        correct_answer=result.correct_answer,
-        explanation=result.explanation,
+        revealed=reveal,
+        correct_answer=result.correct_answer if reveal else None,
+        explanation=result.explanation if reveal else None,
         attempt_id=result.attempt_id,
+        used_hint=result.used_hint,
+        mastery_updated=result.mastery_updated,
         mastery=MasteryDelta(
             concept_id=result.concept_id,
             concept_name=result.concept_name,
@@ -256,6 +281,52 @@ async def submit_answer(payload: AnswerIn):
             crossed_threshold=result.crossed_threshold,
         ),
     )
+
+
+@app.post("/hint", response_model=HintOut)
+async def get_hint(payload: HintIn):
+    """A nudge for a wrong answer.
+
+    The generator is never told which option is correct, retrieval excludes
+    this question's own explanation, and the finished text is checked for the
+    answer before it is returned. See tutor/hints.py.
+    """
+    question = await _load_question(payload.question_id)
+
+    if payload.selected >= len(question["options"]):
+        raise HTTPException(status_code=400, detail="selected option out of range")
+    if payload.selected == question["answer"]:
+        raise HTTPException(status_code=400, detail="that answer was correct")
+
+    try:
+        hint = await hints.generate(payload.user_id, question, payload.selected)
+    except llm.LLMError as exc:
+        # Free-tier quotas are small and the daily one is easy to hit, so this
+        # is an expected state rather than a crash. The learner is told to try
+        # again rather than shown a stack trace, and the question stays
+        # unanswered so nothing is lost.
+        raise HTTPException(
+            status_code=503,
+            detail="The tutor is unavailable right now. Try again in a minute.",
+        ) from exc
+
+    return HintOut(hint=hint.text, citations=hint.citations)
+
+
+async def _load_question(question_id: int) -> dict:
+    question = await db.query_one(
+        """
+        SELECT q.id, q.concept_id, c.name AS concept_name,
+               q.stem, q.options, q.answer, q.difficulty, q.explanation
+        FROM questions q
+        JOIN concepts c ON c.id = q.concept_id
+        WHERE q.id = %s
+        """,
+        (question_id,),
+    )
+    if question is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    return question
 
 
 @app.get("/mastery", response_model=list[ConceptMasteryOut])

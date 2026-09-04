@@ -19,7 +19,8 @@ taught before being tested.
 | 1.5 | Teaching mode — lessons before questions (piloted on Caching) | done |
 | 2a | Knowledge base, keyword retrieval, measurement harness | done |
 | 2b | Embeddings, hybrid retrieval, reranking | done |
-| 2c | Hint generation + hint-before-reveal answer flow | next |
+| 2c | Hint generation + hint-before-reveal answer flow | done |
+| 3 | Agent loop, tools, code sandbox, cross-session memory | next |
 | 3 | Agent loop, tools, code sandbox, cross-session memory | |
 | 4 | Evals, observability, load testing, deploy | |
 
@@ -42,6 +43,88 @@ Notable choices and why:
 - **The adaptive model is pure functions.** `backend/adaptive/model.py` has no
   database and no I/O, so it can be unit tested and simulated directly. The
   database layer wraps it rather than being tangled through it.
+
+## The AI tutor
+
+Get a question wrong and the answer is **not** shown. You get a nudge and
+another try instead — revealing the answer immediately would leave nothing to
+work out, which is the whole point of the hint.
+
+### Three defences against giving the answer away, weakest last
+
+1. **The model is never told which option is correct.** It receives the
+   question and the one option the learner chose. Not the answer, not the other
+   distractors. This is the only defence that does not depend on anything
+   behaving well: it cannot reveal what it was never given.
+2. **Retrieval excludes the question's own explanation**, which is by
+   construction a restatement of its answer.
+3. **`tutor/guardrail.py` reads the finished hint** and rejects it if the answer
+   surfaced anyway — deduced from the material, or guessed. A rejected hint is
+   regenerated with a stronger instruction, up to three times, then falls back
+   to simply pointing at the lesson step.
+
+A prompt instruction not to reveal the answer is a *request*. Only the third
+layer can fail open, and it is the one that catches the other two being wrong.
+
+**Both leaks the guardrail now catches were found by using the product, not by
+reasoning about it.**
+
+- *"the application code is what fills the cache when it **misses**"* slipped
+  past a check looking for "miss". Fixed by comparing stems, not surface forms.
+- *"the cache is a passive box that your own **application code** must fill"*
+  scored 67% word overlap against a three-word answer and passed a 75%
+  threshold. A ratio is too coarse when an answer has three distinctive words,
+  so the rule is now also: all but at most one of them present is a leak.
+
+**Known limitation.** This is a lexical check. It catches quoting and
+paraphrase-with-shared-words; it cannot catch a paraphrase that shares no
+vocabulary. Observed: "write-back **defers the store write**" restated as
+"write-back **delays writing to the database**" — the same claim, not one word
+in common. Judging that requires reading for meaning, which is what Phase 4's
+LLM-as-judge is for.
+
+### Why hints are not streamed
+
+The latency target asks for a fast first token, which means streaming. But the
+guardrail can only judge a hint once it is complete, and text already on screen
+cannot be taken back. Streaming and verify-before-showing are mutually
+exclusive here, and a fast hint that hands over the answer defeats the feature.
+The UI shows a pending state instead.
+
+### A hinted answer earns less
+
+Getting there with help is real progress and counts — at 40% of the normal
+gain. Full credit would make "ask for a hint every time" the fastest route to a
+high score, and mastery is meant to predict what the learner can do unaided, so
+an assisted success is weaker evidence of exactly that. Wrong answers after a
+hint are not punished extra: taking an offered hint should never cost anything.
+
+Hint usage is read from the database, never from the request. A client that
+reported its own hint usage could claim full credit for an assisted answer.
+
+**A repeated wrong answer on the same question does not move mastery again.**
+One question is one piece of evidence, and the retry is an easier problem
+anyway — the learner now knows one option is wrong, so the four-way guess has
+become a three-way one.
+
+### Free-tier reality
+
+Generation runs on Google AI Studio's free tier. The quota is the binding
+constraint, not the model's capability:
+
+| Model | Free-tier limit | Notes |
+| --- | --- | --- |
+| `gemini-3.8-flash` | — | returned 503 "high demand" on the first probe |
+| `gemini-3.5-flash` | **20 requests/day** | exhausted by one afternoon of testing |
+| `gemini-3.1-flash-lite` | Flash-Lite tier | the default here |
+
+Widely quoted figures of 1,500 requests/day apply to older models. Flash-Lite
+turned out to write *shorter* hints than Flash, which for a nudge is an
+improvement rather than a compromise. On 429 or 503 the client falls through to
+the next model; when everything is exhausted `/hint` returns 503 with a message
+the learner can read, and their question stays unanswered so nothing is lost.
+
+Embeddings and reranking are local, so none of this touches retrieval.
 
 ## Retrieval
 
@@ -313,6 +396,9 @@ of editing the file and applying it again.
 │   │   ├── engine.py      question selection and persistence
 │   │   └── teaching.py    when to explain instead of test
 │   ├── tutor/
+│   │   ├── hints.py           retrieve, ground, generate, verify
+│   │   ├── guardrail.py       rejects a hint that gives the answer away
+│   │   ├── llm.py             provider + model fallback
 │   │   ├── knowledge_base.py  assembling the retrievable corpus
 │   │   ├── embedding.py       local vectors (bge-base, ONNX)
 │   │   ├── reranking.py       local cross-encoder
@@ -346,7 +432,8 @@ of editing the file and applying it again.
 | GET | `/next?user_id=` | what to do now: a lesson step, or a question |
 | POST | `/lesson/complete` | mark a lesson step as read (awards no mastery) |
 | GET | `/question?user_id=` | next question only, bypassing the teaching check |
-| POST | `/answer` | grades server-side, logs the attempt, updates mastery |
+| POST | `/answer` | grades server-side; withholds the answer on a first wrong try |
+| POST | `/hint` | a grounded nudge, generated without knowing the answer |
 | GET | `/mastery?user_id=` | capability across every concept |
 | GET | `/debug/selection?user_id=` | why the engine picks what it picks (development aid) |
 

@@ -307,11 +307,19 @@ async def test_a_stuck_learner_is_eventually_released(client):
         )
 
     stored = await db.query_one(
-        "SELECT score, attempts FROM mastery WHERE user_id = %s AND concept_id = %s",
+        "SELECT score FROM mastery WHERE user_id = %s AND concept_id = %s",
+        (user, TAUGHT_CONCEPT),
+    )
+    tried = await db.query_one(
+        """
+        SELECT count(*) AS n FROM attempts a
+        JOIN questions q ON q.id = a.question_id
+        WHERE a.user_id = %s AND q.concept_id = %s
+        """,
         (user, TAUGHT_CONCEPT),
     )
     assert float(stored["score"]) < teaching.TEACH_BELOW  # still stuck
-    assert stored["attempts"] >= teaching.PRACTICE_ATTEMPTS_BEFORE_MOVING_ON
+    assert tried["n"] >= teaching.PRACTICE_ATTEMPTS_BEFORE_MOVING_ON
 
     # ...but no longer pinned to it.
     assert await teaching.concept_awaiting_practice(user) is None
