@@ -17,7 +17,9 @@ taught before being tested.
 | 0 | Skeleton: React + FastAPI + Postgres, one question end to end | done |
 | 1 | Adaptive difficulty engine (mastery tracking, flow-zone selection) | done |
 | 1.5 | Teaching mode — lessons before questions (piloted on Caching) | done |
-| 2 | AI tutor: hybrid retrieval + RAG hints | next |
+| 2a | Knowledge base, keyword retrieval, measurement harness | done |
+| 2b | Embeddings, hybrid retrieval, reranking | needs an API key |
+| 2c | Hint generation + hint-before-reveal answer flow | needs an API key |
 | 3 | Agent loop, tools, code sandbox, cross-session memory | |
 | 4 | Evals, observability, load testing, deploy | |
 
@@ -40,6 +42,55 @@ Notable choices and why:
 - **The adaptive model is pure functions.** `backend/adaptive/model.py` has no
   database and no I/O, so it can be unit tested and simulated directly. The
   database layer wraps it rather than being tangled through it.
+
+## Retrieval
+
+The tutor has to ground its hints in real material, and retrieval quality is the
+ceiling on hint quality — a tutor cannot explain using something it never found,
+and it will invent something to fill the gap.
+
+**The corpus is assembled, not authored.** Chunks come from material that
+already had to exist: lesson steps, and the explanation attached to each
+question. The lesson steps were written one idea per step, which is exactly the
+unit a retrieval chunk wants to be, so chunking — normally the fiddliest part of
+building a RAG corpus — is a no-op here.
+
+**A question never retrieves its own explanation.** That explanation is a
+restatement of the answer; handing it to the tutor is handing over the answer to
+give away. A prompt instruction not to reveal the answer is a request. Not
+putting the answer in front of the model is a guarantee. Both are used.
+
+**Keyword search uses OR, not AND.** Postgres helpers (`websearch_to_tsquery`,
+`plainto_tsquery`) join every term with AND, so
+`why does my cache still show the old value after an update` becomes
+`cach & still & show & old & valu & updat` — and no chunk contains all six.
+Measured: every test query returned zero rows before this was changed. Real
+ranked retrieval matches any term and ranks by overlap, so query text is run
+through `to_tsvector` and the lexemes rejoined with `|`.
+
+### Measured quality
+
+24 golden queries over 29 chunks, phrased the way a stuck learner would put
+them. `uv run python -m evals.retrieval_eval`
+
+| Method | Recall@5 | Hit@5 | MRR |
+| --- | --- | --- | --- |
+| keyword only | **0.806** | 0.875 | 0.651 |
+| + dense (embeddings) | not yet measured | | |
+| + reranking | not yet measured | | |
+
+Keyword search found nothing at all for three queries, and they show exactly
+where lexical matching runs out:
+
+- *"what actually is a cache"* — the word appears in every chunk, so it
+  discriminates nothing
+- *"how long should something stay in the cache"* — the answer says TTL, time to
+  live, lifetime, sixty seconds; the query shares no word with any of them
+- *"is a cache a kind of database"* — both terms are everywhere
+
+These are the queries dense retrieval exists for. The ruler was built before the
+thing it measures, so the improvement will be a number rather than an
+impression.
 
 ## Teaching mode
 
@@ -149,6 +200,10 @@ docker exec -i flowtutor-db psql -U flowtutor -d flowtutor < backend/lessons.sql
 ```
 
 ```bash
+cd backend && uv run python -m tutor.knowledge_base
+```
+
+```bash
 cd backend && uv run uvicorn main:app --reload --port 8000
 ```
 
@@ -209,6 +264,12 @@ of editing the file and applying it again.
 │   │   ├── model.py       the mathematics -- pure functions, no I/O
 │   │   ├── engine.py      question selection and persistence
 │   │   └── teaching.py    when to explain instead of test
+│   ├── tutor/
+│   │   ├── knowledge_base.py  assembling the retrievable corpus
+│   │   └── retrieval.py       finding material to ground a hint
+│   ├── evals/
+│   │   ├── golden_retrieval.json  24 hand-written query/answer pairs
+│   │   └── retrieval_eval.py      Recall@k, Hit@k, MRR
 │   ├── lessons.sql        lesson content (idempotent)
 │   ├── seed.sql           5 concepts, 22 questions (idempotent)
 │   ├── alembic/versions/  schema migrations

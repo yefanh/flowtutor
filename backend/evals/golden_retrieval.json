@@ -1,0 +1,137 @@
+{
+  "about": [
+    "Golden set for retrieval quality on the Caching concept.",
+    "",
+    "Each query is phrased the way a stuck learner would actually put it, not",
+    "as a keyword string -- that is the input retrieval will really receive.",
+    "",
+    "`relevant` lists the chunk keys that genuinely answer the query. Keys are",
+    "stable across knowledge-base rebuilds; row ids are not.",
+    "",
+    "Judgement calls are recorded in `note`. Anything ambiguous is written down",
+    "rather than left implicit, because a golden set nobody can audit is just a",
+    "number generator."
+  ],
+  "queries": [
+    {
+      "query": "why would I put a cache in front of my database",
+      "relevant": ["lesson:1:1", "lesson:1:2", "explanation:1"],
+      "note": "The motivation. Both the problem statement and the fix count."
+    },
+    {
+      "query": "what actually is a cache",
+      "relevant": ["lesson:1:2"],
+      "note": "Definition lives in step 2 only."
+    },
+    {
+      "query": "the database is answering the same question over and over",
+      "relevant": ["lesson:1:1"],
+      "note": "Restates the opening problem in the learner's own words."
+    },
+    {
+      "query": "how much faster is a cache really",
+      "relevant": ["lesson:1:3"],
+      "note": null
+    },
+    {
+      "query": "why is reading from memory faster than reading from disk",
+      "relevant": ["lesson:1:3"],
+      "note": "The latency ladder."
+    },
+    {
+      "query": "what is a cache hit rate and why does it matter",
+      "relevant": ["lesson:1:3"],
+      "note": null
+    },
+    {
+      "query": "my cached data is out of date after someone updates it",
+      "relevant": ["lesson:1:4", "explanation:5"],
+      "note": "Staleness. Step 4 explains it, explanation 5 says what to do."
+    },
+    {
+      "query": "what do I give up by using a cache",
+      "relevant": ["lesson:1:4"],
+      "note": "The freshness-for-speed trade."
+    },
+    {
+      "query": "is there data I should never cache",
+      "relevant": ["lesson:1:4"],
+      "note": "Step 4 closes on exactly this."
+    },
+    {
+      "query": "how long should something stay in the cache",
+      "relevant": ["lesson:1:5"],
+      "note": null
+    },
+    {
+      "query": "what does TTL mean",
+      "relevant": ["lesson:1:5"],
+      "note": "Term is introduced in step 5."
+    },
+    {
+      "query": "should I delete the cached copy when the underlying data changes",
+      "relevant": ["lesson:1:5", "explanation:5"],
+      "note": "Invalidation."
+    },
+    {
+      "query": "increasing the cache size did not fix my stale data problem",
+      "relevant": ["explanation:5", "lesson:1:4"],
+      "note": "The point is that staleness is not a capacity problem."
+    },
+    {
+      "query": "who is responsible for putting things into the cache",
+      "relevant": ["lesson:1:6", "explanation:2"],
+      "note": null
+    },
+    {
+      "query": "what is the cache-aside pattern",
+      "relevant": ["lesson:1:6", "explanation:2"],
+      "note": null
+    },
+    {
+      "query": "what should my code do on a cache miss",
+      "relevant": ["lesson:1:6", "explanation:2"],
+      "note": null
+    },
+    {
+      "query": "does the cache talk to the database by itself",
+      "relevant": ["lesson:1:6"],
+      "note": "Step 6 makes the point that the cache is passive."
+    },
+    {
+      "query": "a thousand requests hit the database the moment the key expired",
+      "relevant": ["lesson:1:7", "explanation:3"],
+      "note": "Stampede, described as a symptom."
+    },
+    {
+      "query": "what is a thundering herd",
+      "relevant": ["lesson:1:7", "explanation:3"],
+      "note": "The name for the same thing."
+    },
+    {
+      "query": "how do I stop all my keys expiring at the same moment",
+      "relevant": ["lesson:1:7", "explanation:3"],
+      "note": "Jitter."
+    },
+    {
+      "query": "only one request should refill the cache while the others wait",
+      "relevant": ["lesson:1:7", "explanation:3"],
+      "note": "Single-flight, described rather than named."
+    },
+    {
+      "query": "difference between write-through and write-back",
+      "relevant": ["explanation:4"],
+      "note": "Not covered by the lesson at all -- the only source is the question explanation. Deliberately kept: it shows what retrieval does when the lesson has a gap."
+    },
+    {
+      "query": "is a cache a kind of database",
+      "relevant": ["lesson:1:2"],
+      "note": "Step 2 states it holds no truth of its own."
+    },
+    {
+      "query": "what does a cache actually save me",
+      "relevant": ["lesson:1:1", "lesson:1:3"],
+      "note": "Ambiguous on purpose: both the repeated-work framing and the latency numbers are fair answers."
+    }
+  ]
+}
