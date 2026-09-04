@@ -61,17 +61,89 @@ class LLMError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ToolCall:
+    """The model asking for a tool to be run. Arguments are already parsed."""
+
+    name: str
+    arguments: dict
+
+
+@dataclass(frozen=True)
 class Completion:
     text: str
     model: str
     input_tokens: int
     output_tokens: int
     latency_ms: float
+    tool_calls: tuple[ToolCall, ...] = ()
+    raw: object | None = None
+    """The provider's own representation of this turn, kept opaque.
+
+    Gemini rejects a replayed function call that was rebuilt from its parsed
+    fields -- the call carries a `thought_signature` that has to come back
+    byte-for-byte, and a reconstruction drops it:
+
+        400 INVALID_ARGUMENT: Function call is missing a thought_signature in
+        functionCall parts.
+
+    So the original object is carried through and echoed back verbatim. Nothing
+    above this module reads it; the agent copies it from a Completion into a
+    Turn and never looks inside.
+    """
+
+    @property
+    def wants_tool(self) -> bool:
+        return bool(self.tool_calls)
 
 
-async def complete(system: str, user: str, max_output_tokens: int = 400) -> Completion:
+@dataclass(frozen=True)
+class ToolSpec:
+    """A tool as the model sees it.
+
+    The description is not documentation, it is the interface. The model
+    chooses tools by reading it, so a vague description produces a tool that is
+    called at the wrong times -- which looks like a reasoning failure and is
+    actually a writing one.
+    """
+
+    name: str
+    description: str
+    parameters: dict
+
+
+@dataclass(frozen=True)
+class Turn:
+    """One entry in the conversation the agent is building up.
+
+    `role` is "user", "model", or "tool". A tool turn carries the result of a
+    call the model asked for on the previous turn.
+    """
+
+    role: str
+    text: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_name: str | None = None
+    tool_result: dict | None = None
+    raw: object | None = None
+
+
+async def complete(
+    system: str,
+    user: str | None = None,
+    max_output_tokens: int = 400,
+    turns: list[Turn] | None = None,
+    tools: list[ToolSpec] | None = None,
+) -> Completion:
+    """One model call.
+
+    Either `user` (a single prompt) or `turns` (a running conversation, which
+    is what the agent loop passes).
+    """
+    if turns is None:
+        turns = [Turn(role="user", text=user or "")]
+
     if PROVIDER == "google":
-        return await _google(system, user, max_output_tokens)
+        return await _google(system, turns, tools or [], max_output_tokens)
     raise LLMError(f"unknown LLM_PROVIDER: {PROVIDER!r}")
 
 
@@ -93,26 +165,74 @@ def _client():
     return genai.Client(api_key=key)
 
 
-async def _google(system: str, user: str, max_output_tokens: int) -> Completion:
+def _to_google_content(turn: "Turn", types):
+    """Translate one turn into the provider's wire format.
+
+    Kept in one place so the rest of the codebase never sees a provider type.
+    """
+    if turn.role == "tool":
+        return types.Content(
+            role="user",
+            parts=[
+                types.Part.from_function_response(
+                    name=turn.tool_name or "", response=turn.tool_result or {}
+                )
+            ],
+        )
+
+    if turn.tool_calls:
+        # Replay the provider's own object when we have it. Rebuilding the call
+        # from its parsed fields loses the thought signature Gemini requires.
+        if turn.raw is not None:
+            return turn.raw
+        return types.Content(
+            role="model",
+            parts=[
+                types.Part.from_function_call(name=call.name, args=call.arguments)
+                for call in turn.tool_calls
+            ],
+        )
+
+    return types.Content(
+        role="model" if turn.role == "model" else "user",
+        parts=[types.Part.from_text(text=turn.text)],
+    )
+
+
+async def _google(
+    system: str,
+    turns: list["Turn"],
+    tools: list["ToolSpec"],
+    max_output_tokens: int,
+) -> Completion:
     from google.genai import types
 
     client = _client()
+    declarations = [
+        types.FunctionDeclaration(
+            name=tool.name, description=tool.description, parameters=tool.parameters
+        )
+        for tool in tools
+    ]
     config = types.GenerateContentConfig(
         system_instruction=system,
         max_output_tokens=max_output_tokens,
         temperature=TEMPERATURE,
-        # The tutor has no tools. Leaving function calling on makes the SDK warn
-        # and adds a code path that cannot be exercised.
+        # The SDK will happily execute tools for us. It must not: the agent
+        # loop is the thing being built here, and hiding it inside the client
+        # library would hide exactly the mechanism worth understanding.
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+        tools=[types.Tool(function_declarations=declarations)] if declarations else None,
     )
+    contents = [_to_google_content(turn, types) for turn in turns]
 
     errors: list[str] = []
     for model in [MODEL, *FALLBACK_MODELS]:
         started = time.perf_counter()
         try:
             response = await client.aio.models.generate_content(
-                model=model, contents=user, config=config
+                model=model, contents=contents, config=config
             )
         except Exception as exc:  # noqa: BLE001 -- provider SDKs raise their own types
             message = str(exc).split("\n")[0]
@@ -124,13 +244,20 @@ async def _google(system: str, user: str, max_output_tokens: int) -> Completion:
                 break
             continue
 
+        calls = tuple(
+            ToolCall(name=c.name or "", arguments=dict(c.args or {}))
+            for c in (response.function_calls or [])
+        )
         usage = response.usage_metadata
+        candidate = (response.candidates or [None])[0]
         return Completion(
-            text=(response.text or "").strip(),
+            text=(response.text or "").strip() if not calls else "",
             model=model,
             input_tokens=usage.prompt_token_count or 0,
             output_tokens=usage.candidates_token_count or 0,
             latency_ms=(time.perf_counter() - started) * 1000,
+            tool_calls=calls,
+            raw=getattr(candidate, "content", None) if calls else None,
         )
 
     raise LLMError("; ".join(errors) or "no model responded")

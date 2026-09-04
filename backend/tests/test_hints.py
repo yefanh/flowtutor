@@ -6,39 +6,11 @@ behaviour worth pinning down here is the model's. What matters is what we send
 it, what we do with what comes back, and what the learner is shown.
 """
 
-import pytest
-
 import db
 from adaptive import model
 from tutor import guardrail, hints, llm
 
 CACHING = 1
-
-
-@pytest.fixture
-def fake_llm(monkeypatch):
-    """Replace the model with a scripted one.
-
-    Returns a recorder so tests can assert on what was sent, which is where the
-    strongest guarantee lives: the correct answer is never in the prompt.
-    """
-    sent: list[tuple[str, str]] = []
-    replies: list[str] = []
-
-    async def fake_complete(system: str, user: str, max_output_tokens: int = 400):
-        sent.append((system, user))
-        text = replies.pop(0) if replies else "Have a look at what the lesson says."
-        return llm.Completion(
-            text=text,
-            model="stub",
-            input_tokens=0,
-            output_tokens=0,
-            latency_ms=0.0,
-        )
-
-    monkeypatch.setattr(llm, "complete", fake_complete)
-    monkeypatch.setattr(hints.llm, "complete", fake_complete)
-    return {"sent": sent, "replies": replies}
 
 
 async def _question(difficulty: int = 2) -> dict:
@@ -116,23 +88,32 @@ async def test_the_correct_answer_is_never_in_the_prompt(client, fake_llm):
 
     await hints.generate(user, question, wrong, record=False)
 
-    system, prompt = fake_llm["sent"][0]
-    assert correct_text not in prompt
-    assert correct_text not in system
-    assert question["options"][wrong] in prompt
+    sent = fake_llm["sent"][0]
+    assert correct_text not in sent["text"]
+    assert correct_text not in sent["system"]
+    assert question["options"][wrong] in sent["text"]
     # Nor the other distractors -- only the stem and what they chose.
     for i, option in enumerate(question["options"]):
         if i != wrong:
-            assert option not in prompt
+            assert option not in sent["text"]
 
 
 async def test_a_question_never_grounds_its_own_hint(client, fake_llm):
+    """Whatever the agent searches for, it cannot reach this question's own
+    explanation -- the exclusion is applied inside the tool, not asked for."""
     user = 9302
     await _reset(user)
     question = await _question()
     wrong = (question["answer"] + 1) % len(question["options"])
 
+    fake_llm["replies"].extend(
+        [
+            [llm.ToolCall(name="search_material", arguments={"query": question["stem"]})],
+            "See lesson step 6.",
+        ]
+    )
     hint = await hints.generate(user, question, wrong, record=False)
+    assert hint.sources
     assert f"explanation:{question['id']}" not in hint.sources
 
 
@@ -163,11 +144,11 @@ async def test_persistent_leaking_falls_back_to_pointing(client, fake_llm):
     wrong = (question["answer"] + 1) % len(question["options"])
     answer_text = question["options"][question["answer"]]
 
-    fake_llm["replies"].extend([answer_text] * hints.MAX_GENERATION_ATTEMPTS)
+    fake_llm["replies"].extend([answer_text] * (hints.MAX_REWRITE_ATTEMPTS + 1))
     hint = await hints.generate(user, question, wrong, record=False)
 
     assert hint.fell_back
-    assert hint.leaked_attempts == hints.MAX_GENERATION_ATTEMPTS
+    assert hint.leaked_attempts == hints.MAX_REWRITE_ATTEMPTS
     assert not guardrail.check(hint.text, answer_text, question["stem"]).leaked
 
 

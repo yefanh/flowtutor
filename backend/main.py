@@ -351,6 +351,31 @@ async def get_mastery(user_id: int = Query(default=1, ge=1)):
     ]
 
 
+@app.get("/debug/hints")
+async def debug_hints(user_id: int = Query(default=1, ge=1), limit: int = Query(10, ge=1)):
+    """What the tutor did, step by step. Development aid, not product.
+
+    An agent is several decisions deep, so when a hint is wrong the question is
+    always WHICH step was wrong -- a bad search, a bad reading of good
+    material, or a bad write-up. From the outside those look identical. This is
+    the view that tells them apart.
+    """
+    rows = await db.query_all(
+        """
+        SELECT h.created_at, h.model, h.steps, h.trace, h.sources,
+               h.leaked_attempts, h.latency_ms, h.hint, q.stem,
+               q.options ->> h.selected AS they_chose
+        FROM hints h
+        JOIN questions q ON q.id = h.question_id
+        WHERE h.user_id = %s
+        ORDER BY h.id DESC
+        LIMIT %s
+        """,
+        (user_id, limit),
+    )
+    return rows
+
+
 @app.get("/debug/selection")
 async def debug_selection(user_id: int = Query(default=1, ge=1)):
     """Why the engine would pick what it picks. Development aid, not product.

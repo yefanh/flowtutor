@@ -20,7 +20,9 @@ taught before being tested.
 | 2a | Knowledge base, keyword retrieval, measurement harness | done |
 | 2b | Embeddings, hybrid retrieval, reranking | done |
 | 2c | Hint generation + hint-before-reveal answer flow | done |
-| 3 | Agent loop, tools, code sandbox, cross-session memory | next |
+| 3a | Agent loop, tools, cross-session memory, traces | done |
+| 3b | Code exercises + sandbox | blocked: no code exercises exist yet |
+| 4 | Evals, observability, load testing, deploy | next |
 | 3 | Agent loop, tools, code sandbox, cross-session memory | |
 | 4 | Evals, observability, load testing, deploy | |
 
@@ -43,6 +45,83 @@ Notable choices and why:
 - **The adaptive model is pure functions.** `backend/adaptive/model.py` has no
   database and no I/O, so it can be unit tested and simulated directly. The
   database layer wraps it rather than being tangled through it.
+
+## The agent
+
+An agent is not a model, it is a loop around one:
+
+    plan  -> the model looks at the situation and picks a tool
+    act   -> our code runs it
+    observe -> the result goes back into the conversation
+    repeat until it answers instead of calling something
+
+The model supplies the judgement; the loop supplies the turns. All of it is in
+`tutor/agent.py`, and it is deliberately hand-written: the provider SDK will run
+this loop for us, and so will several frameworks, and all of them hide the one
+mechanism worth understanding. Provider function calling *is* used for the tool
+protocol — getting structured calls back beats parsing them out of prose. The
+loop is ours; the wire format is theirs.
+
+### The tools
+
+| Tool | What it does |
+| --- | --- |
+| `search_material` | Search lesson steps and explanations for this concept |
+| `recall_learner` | This learner's mastery, recent wrong answers, and kept notes |
+| `remember` | Write one durable observation for future sessions |
+
+**No tool takes a `user_id`.** Every tool is bound to a learner before it is
+offered, so there is no way for the model to ask for somebody else's history and
+no prompt injection can make it. The model's inputs include retrieved text and,
+through memory, text an earlier model wrote — the tool boundary is where "that
+is data, not instructions" is enforced structurally rather than hopefully.
+
+`MAX_STEPS` is a termination guarantee, not a tuning knob. On the final pass the
+tools are withheld entirely: asking a model not to call tools while still
+offering them is a request; taking them away makes an answer the only thing it
+can produce.
+
+### Is the agent earning its keep? Not yet, on this model.
+
+An agent with tools it never calls is a slower pipeline. That is what this was
+at first — given a learner sitting at 0.12 mastery with four straight wrong
+answers, the tutor searched once and answered, never looking at who it was
+talking to.
+
+The first suspected cause was the tool description: `recall_learner` said to use
+it "when their mistake might be part of a pattern", and whether there *is* a
+pattern is only knowable by calling it. A tool worth calling only under a
+condition the model cannot observe will not get called. So a one-line summary of
+how the learner is doing now goes in the prompt, with the detail still behind the
+tool.
+
+**That changed nothing.** Changing the model did:
+
+| Model | Steps | Tools called |
+| --- | --- | --- |
+| `gemini-3.1-flash-lite` | 1 | search |
+| `gemini-flash-latest` | 1 | search |
+| `gemini-3.5-flash` | **2** | search, **recall_learner** |
+
+Multi-tool planning here is a capability question, and the model with a workable
+free quota does not have it. The loop is correct either way — the tests pin the
+mechanics — but on Flash-Lite it currently behaves like the fixed pipeline it
+replaced, at slightly more latency. Switching is one env var.
+
+Whether the agent is *worth* it is a question for Phase 4: with traces recorded,
+hints that used `recall_learner` can be scored against hints that did not. Until
+that is measured, "the agent helps" is a hypothesis, not a result.
+
+### Observability
+
+Every step is stored with the hint — which tool, what arguments, what came back.
+`GET /debug/hints?user_id=` reads it back.
+
+This is not optional for an agent. Several decisions deep, a wrong answer could
+be a bad search, a bad reading of good material, or a bad write-up, and from the
+outside those look identical. The trace is what tells them apart. Retrieved
+passages are summarised to their source ids rather than duplicated — the text is
+already in the database.
 
 ## The AI tutor
 
@@ -396,7 +475,9 @@ of editing the file and applying it again.
 │   │   ├── engine.py      question selection and persistence
 │   │   └── teaching.py    when to explain instead of test
 │   ├── tutor/
-│   │   ├── hints.py           retrieve, ground, generate, verify
+│   │   ├── agent.py           the plan-act-observe loop
+│   │   ├── tools.py           what the agent can call
+│   │   ├── hints.py           runs the agent, then verifies its output
 │   │   ├── guardrail.py       rejects a hint that gives the answer away
 │   │   ├── llm.py             provider + model fallback
 │   │   ├── knowledge_base.py  assembling the retrievable corpus
@@ -434,6 +515,7 @@ of editing the file and applying it again.
 | GET | `/question?user_id=` | next question only, bypassing the teaching check |
 | POST | `/answer` | grades server-side; withholds the answer on a first wrong try |
 | POST | `/hint` | a grounded nudge, generated without knowing the answer |
+| GET | `/debug/hints?user_id=` | every step the agent took (development aid) |
 | GET | `/mastery?user_id=` | capability across every concept |
 | GET | `/debug/selection?user_id=` | why the engine picks what it picks (development aid) |
 
