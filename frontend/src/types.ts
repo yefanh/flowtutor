@@ -19,6 +19,29 @@ export interface Question {
   difficulty: number
 }
 
+/** One step of a lesson: teaching, not testing. */
+export interface LessonStep {
+  lesson_id: number
+  concept_id: number
+  concept_name: string
+  step: number
+  total_steps: number
+  title: string
+  body: string
+}
+
+/**
+ * What to do next -- a tagged union.
+ *
+ * Deciding whether a learner needs teaching or practice is the engine's job,
+ * so the client only branches on the tag. Narrowing on `kind` is what makes
+ * this safe: inside the 'lesson' branch TypeScript knows `lesson` is not null,
+ * so there is no optional-chaining guesswork in the components.
+ */
+export type NextItem =
+  | { kind: 'lesson'; lesson: LessonStep; question: null }
+  | { kind: 'question'; lesson: null; question: Question }
+
 /** How one answer moved the learner's estimate for that concept. */
 export interface MasteryDelta {
   concept_id: number
@@ -45,6 +68,8 @@ export interface ConceptMastery {
   score: number
   attempts: number
   is_mastered: boolean
+  lesson_steps_total: number
+  lesson_steps_done: number
 }
 
 export interface AnswerSubmission {

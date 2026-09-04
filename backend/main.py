@@ -3,9 +3,11 @@
 Endpoints:
     GET  /health    liveness + database connectivity
     GET  /concepts  list concepts
+    GET  /next      the next thing to do: a lesson step, or a question
     GET  /question  serve the next question, chosen adaptively, WITHOUT the answer
     POST /answer    grade a submission, update mastery, log the attempt
-    GET  /mastery   this learner's mastery across every concept
+    POST /lesson/complete  mark a lesson step as read
+    GET  /mastery   this learner's mastery and lesson progress per concept
 
 SECURITY INVARIANT (holds for every later phase too):
     The correct answer never leaves the server before the learner has submitted.
@@ -16,13 +18,14 @@ Every route is `async def`. See db.py for why that is not optional here.
 """
 
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import db
-from adaptive import engine, model
+from adaptive import engine, model, teaching
 
 
 @asynccontextmanager
@@ -33,7 +36,7 @@ async def lifespan(app: FastAPI):
     await db.pool.close()
 
 
-app = FastAPI(title="FlowTutor API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="FlowTutor API", version="0.3.0", lifespan=lifespan)
 
 # The Vite dev server proxies /api to this process, so CORS is not strictly
 # needed in development. Kept for direct calls from the browser or curl.
@@ -96,12 +99,43 @@ class AnswerOut(BaseModel):
     mastery: MasteryDelta
 
 
+class LessonStepOut(BaseModel):
+    lesson_id: int
+    concept_id: int
+    concept_name: str
+    step: int
+    total_steps: int
+    title: str
+    body: str
+
+
+class NextOut(BaseModel):
+    """Either a lesson step or a question, tagged so the client can branch.
+
+    A tagged union rather than two endpoints, because deciding WHICH of the two
+    a learner needs is the engine's job, not the interface's. If the client had
+    to ask "do I need teaching?" first, that decision would leak into the UI
+    and drift out of sync with the engine.
+    """
+
+    kind: Literal["lesson", "question"]
+    lesson: LessonStepOut | None = None
+    question: QuestionOut | None = None
+
+
+class LessonCompleteIn(BaseModel):
+    user_id: int = Field(ge=1)
+    lesson_id: int = Field(ge=1)
+
+
 class ConceptMasteryOut(BaseModel):
     concept_id: int
     concept_name: str
     score: float
     attempts: int
     is_mastered: bool
+    lesson_steps_total: int
+    lesson_steps_done: int
 
 
 # ------------------------------------------------------------------ endpoints
@@ -119,6 +153,51 @@ async def health():
 @app.get("/concepts")
 async def list_concepts():
     return await db.query_all("SELECT id, name, description FROM concepts ORDER BY id")
+
+
+@app.get("/next", response_model=NextOut)
+async def get_next(user_id: int = Query(default=1, ge=1)):
+    """What this learner should do next.
+
+    Three rules, in order:
+
+      1. Just finished a lesson and not yet shown you can use it? Practise
+         THAT concept. Learn one thing, use it, then learn the next.
+      2. Something below the teaching threshold with an unread lesson? Teach
+         the next step of it.
+      3. Otherwise, the adaptive practice loop.
+
+    Rule 1 has to come first. Without it the engine reads every lesson of
+    every concept before asking anything, because they all start below the
+    threshold -- thirty-five steps of prose before a single question.
+    """
+    awaiting = await teaching.concept_awaiting_practice(user_id)
+    if awaiting is not None:
+        question = await engine.select_question(user_id, force_concept_id=awaiting)
+        if question is not None:
+            return NextOut(kind="question", question=QuestionOut(**question))
+
+    step = await teaching.next_lesson_step(user_id)
+    if step is not None:
+        return NextOut(kind="lesson", lesson=LessonStepOut(**vars(step)))
+
+    question = await engine.select_question(user_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="nothing left to do")
+    return NextOut(kind="question", question=QuestionOut(**question))
+
+
+@app.post("/lesson/complete")
+async def complete_lesson_step(payload: LessonCompleteIn):
+    """Mark a step as read.
+
+    This unlocks practice for the concept. It deliberately does NOT touch
+    mastery: reading is not evidence of capability, and paying out score for it
+    would reward activity instead of learning.
+    """
+    if not await teaching.complete_step(payload.user_id, payload.lesson_id):
+        raise HTTPException(status_code=404, detail="lesson step not found")
+    return {"status": "ok"}
 
 
 @app.get("/question", response_model=QuestionOut)
@@ -186,6 +265,7 @@ async def get_mastery(user_id: int = Query(default=1, ge=1)):
     This is the progress surface of the product. It reports what the learner
     can now do -- deliberately not how many days in a row they showed up.
     """
+    lessons = {row["concept_id"]: row for row in await teaching.lesson_state(user_id)}
     return [
         ConceptMasteryOut(
             concept_id=c.concept_id,
@@ -193,6 +273,8 @@ async def get_mastery(user_id: int = Query(default=1, ge=1)):
             score=c.score,
             attempts=c.attempts,
             is_mastered=c.is_mastered,
+            lesson_steps_total=lessons.get(c.concept_id, {}).get("total_steps", 0),
+            lesson_steps_done=lessons.get(c.concept_id, {}).get("completed_steps", 0),
         )
         for c in await engine.get_mastery(user_id)
     ]

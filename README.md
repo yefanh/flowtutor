@@ -9,14 +9,15 @@ metric is mastery gain, never streaks or daily active use.
 
 ## Status
 
-**Phase 1 complete** — the engine now estimates what each learner knows and
-pitches the next question at the edge of it.
+**Teaching mode piloted on one concept** — a learner starting from zero is now
+taught before being tested.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 0 | Skeleton: React + FastAPI + Postgres, one question end to end | done |
 | 1 | Adaptive difficulty engine (mastery tracking, flow-zone selection) | done |
-| 2 | AI tutor: hybrid retrieval + RAG hints | |
+| 1.5 | Teaching mode — lessons before questions (piloted on Caching) | done |
+| 2 | AI tutor: hybrid retrieval + RAG hints | next |
 | 3 | Agent loop, tools, code sandbox, cross-session memory | |
 | 4 | Evals, observability, load testing, deploy | |
 
@@ -39,6 +40,46 @@ Notable choices and why:
 - **The adaptive model is pure functions.** `backend/adaptive/model.py` has no
   database and no I/O, so it can be unit tested and simulated directly. The
   database layer wraps it rather than being tangled through it.
+
+## Teaching mode
+
+Phase 1 shipped an engine that assumed the learner had studied the material
+somewhere else and only needed calibrated practice. For a beginner that fails,
+and it fails in a way the engine could not see:
+
+> Mastery alone cannot tell two very different learners apart. One studied the
+> concept and scores badly. One has never been shown the concept at all. Both
+> sit at the floor of the scale, and both get handed difficulty-1 questions
+> forever — but only the first of those is a practice problem.
+
+So `lesson_progress` gives the engine a second input besides the score: has
+this learner actually been through the material? `backend/adaptive/teaching.py`
+holds the logic. Three rules, in order:
+
+1. **Just finished a lesson and not yet shown you can use it?** Practise that
+   concept. Learn one thing, use it, then learn the next.
+2. **Something below the teaching threshold with an unread lesson?** Teach the
+   next step of it.
+3. **Otherwise**, the adaptive practice loop from Phase 1.
+
+Rule 1 is load-bearing. Without it every concept starts below the threshold, so
+the engine walks the learner through every lesson of every concept — dozens of
+steps of prose — before asking a single question.
+
+The threshold sits at 0.35, which is where Phase 1 *measured* the difficulty
+bank running out of road. Below that, the selector clamps to difficulty 1 and
+every question is one the learner is expected to fail. That boundary was
+reported as a limitation of the practice loop; it is really the line where a
+different mechanism belongs.
+
+**Reading a lesson awards no mastery.** It unlocks practice. Reading is not
+evidence of being able to do anything, and paying out score for the act of
+reading would reward activity instead of capability — the exact trap this
+product exists to avoid. Only answers move the number.
+
+Authoring lesson steps for a concept is what switches teaching mode on for it,
+so content can be written one concept at a time with no engine change. Lessons
+live in `backend/lessons.sql`; only Caching has content so far.
 
 ## The adaptive engine
 
@@ -104,6 +145,10 @@ docker exec -i flowtutor-db psql -U flowtutor -d flowtutor < backend/seed.sql
 ```
 
 ```bash
+docker exec -i flowtutor-db psql -U flowtutor -d flowtutor < backend/lessons.sql
+```
+
+```bash
 cd backend && uv run uvicorn main:app --reload --port 8000
 ```
 
@@ -148,8 +193,9 @@ cd backend && uv run alembic revision -m "add mastery table"
 cd backend && uv run alembic current
 ```
 
-`seed.sql` is idempotent (every statement ends in `ON CONFLICT DO NOTHING`), so
-reloading content after a migration is safe.
+`seed.sql` and `lessons.sql` are both idempotent, so reloading content after a
+migration is safe. `lessons.sql` upserts, so revising a lesson step is a matter
+of editing the file and applying it again.
 
 ## Layout
 
@@ -161,7 +207,9 @@ reloading content after a migration is safe.
 │   ├── db.py              async connection pool
 │   ├── adaptive/
 │   │   ├── model.py       the mathematics -- pure functions, no I/O
-│   │   └── engine.py      selection and persistence around it
+│   │   ├── engine.py      question selection and persistence
+│   │   └── teaching.py    when to explain instead of test
+│   ├── lessons.sql        lesson content (idempotent)
 │   ├── seed.sql           5 concepts, 22 questions (idempotent)
 │   ├── alembic/versions/  schema migrations
 │   └── tests/             pytest
@@ -171,6 +219,7 @@ reloading content after a migration is safe.
         ├── api.ts
         ├── types.ts       mirrors the backend response models
         └── components/
+            ├── LessonCard.tsx
             ├── QuestionCard.tsx
             └── MasteryPanel.tsx
 ```
@@ -181,7 +230,9 @@ reloading content after a migration is safe.
 | --- | --- | --- |
 | GET | `/health` | liveness + database connectivity |
 | GET | `/concepts` | list concepts |
-| GET | `/question?user_id=` | next question, chosen adaptively, **never** includes the answer |
+| GET | `/next?user_id=` | what to do now: a lesson step, or a question |
+| POST | `/lesson/complete` | mark a lesson step as read (awards no mastery) |
+| GET | `/question?user_id=` | next question only, bypassing the teaching check |
 | POST | `/answer` | grades server-side, logs the attempt, updates mastery |
 | GET | `/mastery?user_id=` | capability across every concept |
 | GET | `/debug/selection?user_id=` | why the engine picks what it picks (development aid) |

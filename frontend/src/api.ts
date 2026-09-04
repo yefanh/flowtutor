@@ -4,7 +4,7 @@ import type {
   AnswerResult,
   AnswerSubmission,
   ConceptMastery,
-  Question,
+  NextItem,
 } from './types'
 
 const BASE = '/api'
@@ -21,8 +21,24 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export function fetchQuestion(userId: number): Promise<Question> {
-  return request<Question>(`/question?user_id=${userId}`)
+/**
+ * The single entry point for "what now".
+ *
+ * The client never asks "should I be taught or tested?" -- it asks what is
+ * next and renders whichever kind comes back.
+ */
+export function fetchNext(userId: number): Promise<NextItem> {
+  return request<NextItem>(`/next?user_id=${userId}`)
+}
+
+export function completeLessonStep(
+  userId: number,
+  lessonId: number,
+): Promise<{ status: string }> {
+  return request('/lesson/complete', {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId, lesson_id: lessonId }),
+  })
 }
 
 export function fetchMastery(userId: number): Promise<ConceptMastery[]> {

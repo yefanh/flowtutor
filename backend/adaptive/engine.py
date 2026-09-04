@@ -195,7 +195,7 @@ async def _pick_question(
     )
 
 
-async def select_question(user_id: int) -> dict | None:
+async def select_question(user_id: int, force_concept_id: int | None = None) -> dict | None:
     """Choose the next question: the heart of the product.
 
     Two stages, because "what should I practise" and "how hard should it be"
@@ -211,7 +211,29 @@ async def select_question(user_id: int) -> dict | None:
     Once past warmup, EXPLORATION_RATE of the time both stages are skipped and
     a question is drawn at random, so the engine keeps receiving evidence its
     own estimate did not select for.
+
+    `force_concept_id` pins stage 1 and disables exploration. Teaching mode
+    uses it to make the questions right after a lesson be about that lesson.
     """
+    if force_concept_id is not None:
+        row = await db.query_one(
+            """
+            SELECT COALESCE(m.score, %s) AS score
+            FROM concepts c
+            LEFT JOIN mastery m ON m.concept_id = c.id AND m.user_id = %s
+            WHERE c.id = %s
+            """,
+            (model.DEFAULT_MASTERY, user_id, force_concept_id),
+        )
+        if row is None:
+            return None
+        question = await _pick_question(
+            user_id, force_concept_id, model.target_difficulty(float(row["score"]))
+        )
+        if question is not None:
+            question["exploring"] = False
+        return question
+
     answered = await db.query_one(
         "SELECT count(*) AS n FROM attempts WHERE user_id = %s", (user_id,)
     )
