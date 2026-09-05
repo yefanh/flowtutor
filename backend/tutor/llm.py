@@ -2,12 +2,17 @@
 
 ONE THIN INTERFACE, SEVERAL POSSIBLE PROVIDERS
     Everything above this module asks for `complete(system, user)` and gets
-    text back. Which company answers is a configuration value.
+    text back. Who answers is a configuration value.
 
-    That is not speculative flexibility. Free-tier terms move: Gemini Pro went
-    behind billing in May 2026, and the newest Flash model returned 503 on the
-    free tier the first time it was tried here. Swapping providers should be an
-    env var, not a refactor of the hint pipeline.
+    That was not speculative flexibility, and it has now paid for itself. Free
+    tiers turned out to be the binding constraint on this project three times
+    over: which model could be used at all, whether the agent could plan across
+    tools, and whether the evaluation could finish inside a day. Gemini Pro
+    went behind billing in May 2026; the newest Flash returned 503 the first
+    time it was tried; Flash-Lite allows fifteen requests a minute.
+
+    The default is now a model running on this machine. Switching back to a
+    hosted one is an env var, which is exactly what this layer was for.
 
 MODEL FALLBACK
     Same reason, one level down. The newest model is the one most likely to be
@@ -26,6 +31,7 @@ MODEL FALLBACK
 """
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -36,9 +42,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PROVIDER = os.getenv("LLM_PROVIDER", "google")
-MODEL = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite")
-FALLBACK_MODELS = ["gemini-flash-latest", "gemini-3.5-flash"]
+PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
+MODEL = os.getenv("LLM_MODEL", "qwen3.5:9b")
+FALLBACK_MODELS: list[str] = []
+
+# Only used when LLM_PROVIDER=google. Kept so switching back is an env var.
+GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.1-flash-lite")
+GOOGLE_FALLBACKS = ["gemini-flash-latest", "gemini-3.5-flash"]
+
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
 # Low but not zero. Hints should be stable enough that evaluating one tells you
 # something about the next, without being word-for-word identical every time.
@@ -138,6 +150,7 @@ async def complete(
     json_schema: dict | None = None,
     model: str | None = None,
     rate_limit_wait: float = 0.0,
+    temperature: float | None = None,
 ) -> Completion:
     """One model call.
 
@@ -160,9 +173,131 @@ async def complete(
     if turns is None:
         turns = [Turn(role="user", text=user or "")]
 
+    if PROVIDER == "ollama":
+        return await _ollama(
+            system, turns, tools or [], max_output_tokens, json_schema, model, temperature
+        )
     if PROVIDER == "google":
-        return await _google(system, turns, tools or [], max_output_tokens, json_schema, model)
+        return await _google(
+            system,
+            turns,
+            tools or [],
+            max_output_tokens,
+            json_schema,
+            model or GOOGLE_MODEL,
+            rate_limit_wait,
+        )
     raise LLMError(f"unknown LLM_PROVIDER: {PROVIDER!r}")
+
+
+@lru_cache(maxsize=1)
+def _ollama_client():
+    from ollama import AsyncClient
+
+    return AsyncClient(host=OLLAMA_HOST)
+
+
+def _to_ollama_message(turn: "Turn") -> dict:
+    if turn.role == "tool":
+        return {
+            "role": "tool",
+            "tool_name": turn.tool_name or "",
+            "content": json.dumps(turn.tool_result or {}),
+        }
+    if turn.tool_calls:
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": c.name, "arguments": c.arguments}} for c in turn.tool_calls
+            ],
+        }
+    return {
+        "role": "assistant" if turn.role == "model" else "user",
+        "content": turn.text,
+    }
+
+
+async def _ollama(
+    system: str,
+    turns: list["Turn"],
+    tools: list["ToolSpec"],
+    max_output_tokens: int,
+    json_schema: dict | None,
+    model_override: str | None,
+    temperature: float | None = None,
+) -> Completion:
+    """A model running on this machine.
+
+    No key, no quota, no rate limit, no network. That is the whole reason it is
+    here: free-tier limits had become the binding constraint on this project
+    three separate times -- which model could be used at all, whether the agent
+    could plan across tools, and whether the evaluation could finish in a day.
+
+    A 9B model writes a weaker sentence than a frontier one. It also runs as
+    many times as you like, which for an evaluation harness -- something that
+    has to be re-runnable, and eventually has to run in CI -- matters more than
+    the sentence.
+    """
+    client = _ollama_client()
+    model = model_override or MODEL
+    started = time.perf_counter()
+
+    declarations = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            },
+        }
+        for tool in tools
+    ]
+
+    try:
+        response = await client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                *[_to_ollama_message(turn) for turn in turns],
+            ],
+            tools=declarations or None,
+            format=json_schema,
+            # Qwen3 thinks by default, and its reasoning does not come back in
+            # `content` -- it goes to a separate field. Left on, a request for
+            # structured output returned an EMPTY string: the whole token
+            # budget was spent thinking and there was nothing left to answer
+            # with. The same knob that governs the hosted provider governs this
+            # one, so the two behave alike.
+            think=THINKING_BUDGET > 0,
+            options={
+                "temperature": TEMPERATURE if temperature is None else temperature,
+                "num_predict": max_output_tokens,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 -- provider SDKs raise their own types
+        raise LLMError(
+            f"{model}: {exc}. Is Ollama running? Try `brew services start ollama` "
+            f"and `ollama pull {model}`."
+        ) from exc
+
+    message = response.message
+    calls = tuple(
+        ToolCall(
+            name=call.function.name or "",
+            arguments=dict(call.function.arguments or {}),
+        )
+        for call in (message.tool_calls or [])
+    )
+    return Completion(
+        text=(message.content or "").strip(),
+        model=model,
+        input_tokens=response.prompt_eval_count or 0,
+        output_tokens=response.eval_count or 0,
+        latency_ms=(time.perf_counter() - started) * 1000,
+        tool_calls=calls,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -250,7 +385,8 @@ async def _google(
     )
     contents = [_to_google_content(turn, types) for turn in turns]
 
-    candidates = [model_override] if model_override else [MODEL, *FALLBACK_MODELS]
+    # Google's own list, not the top-level MODEL, which now names a local one.
+    candidates = [model_override] if model_override else [GOOGLE_MODEL, *GOOGLE_FALLBACKS]
     errors: list[str] = []
     for model in candidates:
         started = time.perf_counter()

@@ -22,7 +22,7 @@ taught before being tested.
 | 2c | Hint generation + hint-before-reveal answer flow | done |
 | 3a | Agent loop, tools, cross-session memory, traces | done |
 | 3b | Code exercises + sandbox | blocked: no code exercises exist yet |
-| 4a | Hint evaluation harness (LLM-as-judge) | built, not yet run |
+| 4a | Hint evaluation harness (LLM-as-judge) | done — see result below |
 | 4b | Load testing, deploy, resume numbers | |
 | 3 | Agent loop, tools, code sandbox, cross-session memory | |
 | 4 | Evals, observability, load testing, deploy | |
@@ -141,33 +141,63 @@ with, and `hint_eval show` prints hints beside verdicts for a human to check. A
 judge nobody has disagreed with has not been validated; it has just not been
 read.
 
-**Status: built, not yet run.** Generating twenty hints plus judging them
-exceeded a day of free-tier quota. Two things were learned trying:
+### The result: the agent is not earning its keep
 
-- Flash-Lite is **15 requests per minute**, not per day, so a batch job hits the
-  wall immediately. The error carries the exact retry delay the server wants, so
-  the client now honours it — with a budget of zero in the request path (a
-  learner should get a fallback model, not a 35-second pause) and 90 seconds in
-  batch jobs, where nobody is waiting.
-- The harness wrote its cache only at the end, so a quota failure two cases from
-  finishing threw away eight hints that had already been paid for. It now
-  checkpoints after every case and resumes.
+Ten cases, judged on four criteria, averaged over three passes:
 
-### What the partial run already showed
+| Arm | grounded | targeted | no spoiler | actionable | steps |
+| --- | --- | --- | --- | --- | --- |
+| agent (chooses its own tools) | 80% | 100% | 70% | 90% | 0.5 |
+| direct (retrieve, then generate) | 70% | 100% | 70% | 100% | 0.0 |
 
-Eight of ten cases generated before the quota ran out, and two of them are more
-interesting than the six that worked:
+One case apart in either direction on n=10. **The agent and the fixed pipeline
+it replaced are indistinguishable**, which answers the question Phase 3 left
+open. The loop is correct and the tools work; on this workload they buy nothing.
 
-| Case | Steps | Tools |
+Two things had to be fixed before that number meant anything.
+
+**The judge was voting, not measuring.** Run three times on identical input at
+temperature 0.3, it moved by 20–30 percentage points — more than any gap between
+the arms it was supposed to compare. At temperature 0 the spread is ±0%. A
+single pass of an unstable judge reports its own noise with the same confidence
+as a result, so `judge` now averages several passes and prints the spread.
+
+**The rubric was wrong about what a hint is.** The first run scored no_spoiler
+at 20%, and reading the reasons showed the judge was failing hints for saying
+"see lesson step 5" — on the grounds that naming where the answer lives narrows
+it down. That is what a hint is *for*. The rubric now says so explicitly, and
+the same hints scored 70%. The 50 points in between were the ruler, not the
+tutor. Re-judging cost nothing because generation and judging are separate
+commands, which is exactly why they are separate.
+
+**What the number does say:** 70% no-spoiler means three hints in ten still give
+the answer away, which the lexical guardrail passed. That is the gap
+`guardrail.py` cannot close and this harness exists to see.
+
+These figures are for the local 9B model. The hosted model writes noticeably
+more careful hints by eye, and has not been measured — the free tier ran out
+first, which is what pushed generation local in the first place.
+
+### Where the models run, and why
+
+| Path | Provider | Why |
 | --- | --- | --- |
-| 1–6 | 1 | search |
-| 7 | 5 (hit the limit) | search × 4, recall_learner |
-| 8 | 5 (hit the limit) | search × 5 |
+| A learner clicking "hint" | Google Flash-Lite | ~2s. Fifteen requests a minute is far more than one person generates |
+| Evals, batch, CI | Local Qwen3.5 9B via Ollama | Unmetered. Slower, but nobody is waiting |
 
-So the agent does reach for `recall_learner` — but only after four failed
-searches, and only while running out of steps. That is not planning, it is
-flailing, and `MAX_STEPS` is what stops it. A repeated identical call now gets
-told it already ran rather than being executed again.
+Free-tier quota was never the problem for interactive use. It broke *batch*
+work: twenty hints plus judging exceeded a day of it. Running that locally costs
+nothing and can be repeated as often as the rubric changes — which, as above, it
+did.
+
+Two things were needed to make the local model usable, both found by trying:
+
+- Qwen3 thinks by default and its reasoning does not appear in `content`. Left
+  on, a structured-output request returned an **empty string** — the whole token
+  budget went to thinking with nothing left to answer with.
+- Flash-Lite always searched before answering. The local model skipped the
+  search on 6 of 10 cases and wrote from its own knowledge instead, which the
+  `grounded` score is what catches.
 
 ### Observability
 

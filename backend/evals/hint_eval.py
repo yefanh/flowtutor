@@ -46,7 +46,7 @@ from tutor import agent, guardrail, hints, llm, retrieval, tools
 CASES = Path(__file__).parent / "hint_cases.json"
 CACHE = Path(__file__).parent / "hint_runs"
 
-JUDGE_MODEL = "gemini-3.1-flash-lite"
+JUDGE_MODEL = None  # whatever the chosen provider defaults to
 
 RATE_LIMIT_WAIT = 90.0
 """Seconds this harness may sleep when the provider says "too fast".
@@ -73,10 +73,16 @@ material shown. False if it asserts something the material does not say.
 targeted: it engages with the specific option this learner chose, rather than \
 being generic advice about the topic.
 
-no_spoiler: it does not state, paraphrase, or narrow down to the correct \
-answer -- INCLUDING describing the correct mechanism in different words. Be \
-strict. Ask yourself: after reading only this hint, would the learner know \
-which option to pick? If yes, this is false.
+no_spoiler: it does not state, paraphrase, or describe the correct answer or \
+the mechanism behind it, in any wording. Apply this test and only this test: \
+if a learner who had read ONLY this hint could now pick the right option, it \
+is false.
+
+Pointing the learner at material is NOT a spoiler. "See lesson step 5", "look \
+at how the material describes X", "revisit the section on Y" are all fine and \
+are what a hint is for -- telling someone where to look is the opposite of \
+telling them the answer. Mark false only when the hint itself carries the \
+content, not when it says where to find it.
 
 actionable: it gives the learner something concrete to reconsider, or \
 somewhere specific to look.\
@@ -276,12 +282,19 @@ async def _judge_one(item: dict) -> dict:
         json_schema=JUDGE_SCHEMA,
         model=JUDGE_MODEL,
         rate_limit_wait=RATE_LIMIT_WAIT,
+        # Zero, not the generation temperature. Measured on identical input,
+        # a judge at 0.3 moved by 20-30 percentage points between runs --
+        # more than the gap between the two arms it was supposed to compare.
+        # A ruler that moves that much is not measuring, it is voting.
+        temperature=0.0,
     )
     return json.loads(completion.text)
 
 
-async def judge() -> None:
-    runs = sorted(CACHE.glob("*.json"))
+async def judge(repeats: int = 1) -> None:
+    # Judgements are written next to the runs they grade, so a bare *.json
+    # glob picks its own previous output back up on the second run.
+    runs = sorted(p for p in CACHE.glob("*.json") if not p.name.endswith(".judged.json"))
     if not runs:
         raise SystemExit("no generated runs. Run `generate` first.")
 
@@ -294,23 +307,37 @@ async def judge() -> None:
 
     for path in runs:
         items = json.loads(path.read_text())
-        scores = {c: 0 for c in CRITERIA}
-        verdicts = []
-        for item in items:
-            verdict = await _judge_one(item)
-            verdicts.append(verdict)
-            for criterion in CRITERIA:
-                scores[criterion] += int(verdict[criterion])
         n = len(items)
+
+        # Averaged over several passes. Even at temperature zero a judge is not
+        # perfectly stable, and one pass over ten cases reports its own noise
+        # with the same confidence as a result.
+        per_run = []
+        verdicts = []
+        for attempt in range(repeats):
+            run_scores = {c: 0 for c in CRITERIA}
+            run_verdicts = []
+            for item in items:
+                verdict = await _judge_one(item)
+                run_verdicts.append(verdict)
+                for criterion in CRITERIA:
+                    run_scores[criterion] += int(verdict[criterion])
+            per_run.append(run_scores)
+            if attempt == 0:
+                verdicts = run_verdicts
+
+        scores = {c: sum(r[c] for r in per_run) / repeats for c in CRITERIA}
+        spread = {
+            c: (max(r[c] for r in per_run) - min(r[c] for r in per_run)) / n for c in CRITERIA
+        }
         steps = sum(i["steps"] for i in items) / n
-        print(
-            f"{path.stem:<34}"
-            + "".join(
-                f"{scores[c] / n:>10.0%}" if c != "no_spoiler" else f"{scores[c] / n:>12.0%}"
-                for c in CRITERIA[:3]
-            )
-            + f"{scores['actionable'] / n:>12.0%}{steps:>7.1f}"
+        widths = {"grounded": 10, "targeted": 10, "no_spoiler": 12, "actionable": 12}
+        cells = "".join(
+            f"{scores[c] / n:>{widths[c] - 6}.0%}"
+            + (f" +-{spread[c]:.0%}" if repeats > 1 else "      ")
+            for c in CRITERIA
         )
+        print(f"{path.stem:<34}{cells}{steps:>7.1f}")
         path.with_suffix(".judged.json").write_text(
             json.dumps(
                 [{"hint": i["hint"], **v} for i, v in zip(items, verdicts, strict=True)],
@@ -341,7 +368,27 @@ async def main() -> None:
     parser.add_argument("command", choices=["generate", "judge", "show"])
     parser.add_argument("--arm", default="agent", choices=["agent", "direct"])
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=3,
+        help="Judge passes to average. Free locally, and one pass is noise.",
+    )
+    parser.add_argument(
+        "--provider",
+        default="ollama",
+        choices=["ollama", "google"],
+        help=(
+            "Defaults to the local model. Free-tier quotas were never a problem "
+            "for one learner clicking hints -- fifteen requests a minute is far "
+            "more than a person generates. They break BATCH work, which is what "
+            "this is. Nobody is waiting on an eval, so it runs on the machine, "
+            "unmetered, as many times as it needs to."
+        ),
+    )
     args = parser.parse_args()
+
+    llm.PROVIDER = args.provider
 
     if args.command == "show":
         show()
@@ -353,7 +400,7 @@ async def main() -> None:
         if args.command == "generate":
             await generate(args.arm, args.model)
         else:
-            await judge()
+            await judge(args.repeat)
     finally:
         await db.pool.close()
 
